@@ -16,6 +16,7 @@ import (
 	"nmsappsrv/internal/config"
 	"nmsappsrv/internal/corenet"
 	"nmsappsrv/internal/device"
+	"nmsappsrv/internal/devicelog"
 	"nmsappsrv/internal/diagnostics"
 	"nmsappsrv/internal/eventlog"
 	"nmsappsrv/internal/license"
@@ -24,15 +25,19 @@ import (
 	"nmsappsrv/internal/misc"
 	"nmsappsrv/internal/mml"
 	"nmsappsrv/internal/monitor"
+	"nmsappsrv/internal/nmsbackup"
 	"nmsappsrv/internal/ntp"
 	"nmsappsrv/internal/parameter"
+	"nmsappsrv/internal/parammonitor"
 	"nmsappsrv/internal/pm"
 	"nmsappsrv/internal/reboot"
 	"nmsappsrv/internal/reset"
+	"nmsappsrv/internal/restapi"
 	"nmsappsrv/internal/security"
 	"nmsappsrv/internal/site"
 	"nmsappsrv/internal/snmp"
 	sshmod "nmsappsrv/internal/ssh"
+	"nmsappsrv/internal/systemsettings"
 	"nmsappsrv/internal/upgrade"
 	"nmsappsrv/internal/tr069"
 	"nmsappsrv/internal/user"
@@ -137,6 +142,16 @@ func main() {
 	sshH := sshmod.NewHandler(db)
 	mailH := mail.NewHandler(db, cfg.Mail.AESKey)
 	securityH := security.NewHandler(db)
+	shutdownH := upgrade.NewShutdownHandler(db)
+	systemsettingsH := systemsettings.NewSystemSettingsHandler(db, cfg.Mail.AESKey)
+	parammonitorH := parammonitor.NewHandler(db)
+	devicelogH := devicelog.NewHandler(db)
+	nmsbackupRepo := nmsbackup.NewRepository(db)
+	nmsbackupSvc := nmsbackup.NewService(nmsbackupRepo)
+	nmsbackupH := nmsbackup.NewHandler(nmsbackupSvc)
+	restapiRepo := restapi.NewRepository(db)
+	restapiSvc := restapi.NewService(restapiRepo)
+	restapiH := restapi.NewHandler(restapiSvc)
 
 	// 启动SSH Access Timer后台过期检查
 	sshH.StartExpiredChecker()
@@ -434,7 +449,107 @@ func main() {
 			auth.POST("/getSecurityRule", securityH.GetSecurityRule)
 			auth.POST("/updateSecurityRule", securityH.UpdateSecurityRule)
 			auth.GET("/getPasswordStrategy", securityH.GetPasswordStrategy)
+
+			// 关机管理 (Shutdown Management)
+			auth.POST("/shutdown-tasks", shutdownH.AddShutdownTask)
+			auth.GET("/shutdown-tasks", shutdownH.ListShutdownTasks)
+			auth.GET("/shutdown-tasks/:id", shutdownH.ViewShutdownTask)
+			auth.DELETE("/shutdown-tasks/:id", shutdownH.DeleteShutdownTask)
+			auth.GET("/shutdown-tasks/:id/results", shutdownH.ListShutdownResults)
+
+			// 系统设置 (System Settings)
+			auth.GET("/settings/device", systemsettingsH.ListDeviceSettings)
+			auth.PUT("/settings/device", systemsettingsH.UpdateDeviceSettings)
+			auth.GET("/settings/acs", systemsettingsH.ListACSSettings)
+			auth.PUT("/settings/acs", systemsettingsH.UpdateACSSettings)
+			auth.GET("/settings/log", systemsettingsH.ListLogSettings)
+			auth.PUT("/settings/log", systemsettingsH.UpdateLogSettings)
+
+			// 参数监控 (Parameter Monitor)
+			auth.POST("/param-monitor/configs", parammonitorH.AddMonitorConfig)
+			auth.POST("/param-monitor/configs/delete", parammonitorH.DeleteMonitorConfig)
+			auth.POST("/param-monitor/configs/view", parammonitorH.ViewMonitorConfig)
+			auth.PUT("/param-monitor/configs", parammonitorH.UpdateMonitorConfig)
+			auth.GET("/param-monitor/configs", parammonitorH.ListMonitorConfigs)
+			auth.POST("/param-monitor/configs/toggle", parammonitorH.ToggleMonitorConfig)
+			auth.POST("/param-monitor/realtime", parammonitorH.GetRealtimeMonitorData)
+			auth.POST("/param-monitor/reload", parammonitorH.ReloadMonitorParameters)
+			auth.POST("/param-monitor/batch-query", parammonitorH.BatchQueryDeviceParameters)
+
+			// 设备日志采集 (Device Log Collection)
+			auth.POST("/device-log/collection", devicelogH.AddLogCollectionTask)
+			auth.POST("/device-log/collection/results", devicelogH.ListLogCollectionResults)
+			auth.POST("/device-log/delete-all", devicelogH.DeleteAllLogFile)
+			auth.POST("/device-log/delete", devicelogH.DeleteLogFile)
+			auth.POST("/device-log/download", devicelogH.DownloadLogFile)
+			auth.POST("/device-log/files", devicelogH.ListLogFiles)
+			auth.POST("/device-log/periodic/enable", devicelogH.EnablePeriodicUpload)
+			auth.POST("/device-log/periodic/disable", devicelogH.DisablePeriodicUpload)
+
+			// 基站配置备份与恢复 (Base Station Backup & Restore)
+			auth.GET("/bs-backup/info", miscH.ListBaseStationBackupInfo)
+			auth.POST("/bs-backup/import-config", miscH.ImportConfigFile)
+			auth.POST("/bs-backup/export-config", miscH.ExportConfigFile)
+			auth.POST("/bs-backup/backup-tasks", miscH.AddBSBackupTask)
+			auth.POST("/bs-backup/backup-tasks/cancel", miscH.CancelBackupTask)
+			auth.POST("/bs-backup/restore-tasks/cancel", miscH.CancelRestoreTask)
+			auth.POST("/bs-backup/restore-tasks", miscH.AddBSRestoreTask)
+			auth.POST("/bs-backup/tasks/start", miscH.StartBackupOrRestoreTask)
+			auth.POST("/bs-backup/tasks", miscH.ListBSBackupTasks)
+			auth.POST("/bs-backup/tasks/results", miscH.ListDeviceBackupResult)
+			auth.POST("/bs-backup/download-config", miscH.DownloadConfigFile)
+
+			// NMS备份与回退 (NMS Backup & Revert)
+			auth.POST("/nms-backup/tasks", nmsbackupH.AddNMSBackupTask)
+			auth.POST("/nms-backup/tasks/list", nmsbackupH.ListNMSBackupTask)
+			auth.POST("/nms-backup/tasks/modify", nmsbackupH.ModifyNMSBackupTask)
+			auth.POST("/nms-backup/tasks/run", nmsbackupH.RunNMSBackupTask)
+			auth.POST("/nms-backup/tasks/delete", nmsbackupH.DeleteNMSBackupTask)
+			auth.POST("/nms-backup/tasks/revert", nmsbackupH.RevertNMSBackupTask)
+			auth.GET("/nms-backup/config", nmsbackupH.GetBackupAndRestoreConfig)
+			auth.PUT("/nms-backup/config", nmsbackupH.UpdateBackupAndRestoreConfig)
+			auth.POST("/nms-backup/logs", nmsbackupH.ListNMSBackupLogs)
+			auth.POST("/nms-backup/logs/detail", nmsbackupH.GetNMSBackupLogDetail)
 		}
+	}
+
+	// ========== REST API (Northbound) — offset-based pagination ==========
+	rest := router.Group("/api/rest/v1")
+	rest.Use(middleware.AuthMiddleware())
+	{
+		// Devices
+		rest.GET("/devices", restapiH.ListDevices)
+		rest.GET("/devices/:id", restapiH.GetDevice)
+		rest.POST("/devices", restapiH.AddDevice)
+		rest.PUT("/devices/:id", restapiH.ModifyDeviceById)
+		rest.PUT("/devices/sn/:sn", restapiH.ModifyDeviceBySN)
+		rest.DELETE("/devices/:id", restapiH.DeleteDevice)
+
+		// Device Parameters
+		rest.GET("/devices/:id/parameters", restapiH.GetDeviceParams)
+		rest.PUT("/devices/:id/parameters", restapiH.SetDeviceParams)
+		rest.POST("/devices/:id/parameters/preset", restapiH.PresetDeviceParams)
+		rest.GET("/request-status/:requestId", restapiH.GetRequestStatus)
+
+		// Alarms
+		rest.GET("/alarms", restapiH.ListAlarms)
+		rest.POST("/alarms/sync", restapiH.SyncAlarm)
+		rest.POST("/alarms/clear", restapiH.ClearAlarm)
+
+		// Upgrade Files & Tasks
+		rest.POST("/upgrade-files", restapiH.UploadUpgradeFile)
+		rest.GET("/upgrade-files", restapiH.ListUpgradeFiles)
+		rest.DELETE("/upgrade-files/:id", restapiH.DeleteUpgradeFile)
+		rest.POST("/upgrade-tasks", restapiH.CreateUpgradeTask)
+		rest.GET("/upgrade-tasks", restapiH.ListUpgradeTasks)
+
+		// TBG (Third-party Base Station Gateway)
+		rest.POST("/tbg", restapiH.AddTBGs)
+		rest.PUT("/tbg", restapiH.ModifyTBGs)
+		rest.DELETE("/tbg", restapiH.DeleteTBGs)
+		rest.GET("/tbg", restapiH.ListTBGs)
+		rest.GET("/tbg/sn/:sn", restapiH.GetTBGBySN)
+		rest.GET("/tbg/wan-mac/:wanMac", restapiH.GetTBGByWanMac)
 	}
 
 	// TR069 ACS endpoints (CWMP) — 不需要认证，CPE直接访问

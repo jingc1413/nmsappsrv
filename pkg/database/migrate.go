@@ -5,15 +5,20 @@ import (
 	"nmsappsrv/internal/cbsd"
 	"nmsappsrv/internal/corenet"
 	"nmsappsrv/internal/device"
+	"nmsappsrv/internal/devicelog"
 	"nmsappsrv/internal/eventlog"
 	"nmsappsrv/internal/license"
 	"nmsappsrv/internal/misc"
 	"nmsappsrv/internal/mml"
 	"nmsappsrv/internal/monitor"
+	"nmsappsrv/internal/nmsbackup"
 	"nmsappsrv/internal/parameter"
+	"nmsappsrv/internal/parammonitor"
 	"nmsappsrv/internal/pm"
+	"nmsappsrv/internal/restapi"
 	"nmsappsrv/internal/site"
 	sshmod "nmsappsrv/internal/ssh"
+	"nmsappsrv/internal/systemsettings"
 	"nmsappsrv/internal/upgrade"
 	"nmsappsrv/internal/user"
 	"nmsappsrv/pkg/logger"
@@ -159,6 +164,24 @@ func AutoMigrateAll() error {
 
 		// ssh (1)
 		&sshmod.SSHAccessTimerTask{},
+
+		// parammonitor (2)
+		&parammonitor.ParameterMonitorConfig{},
+		&parammonitor.MonitorConfigHasParameter{},
+
+		// devicelog (1)
+		&devicelog.NeLog{},
+
+		// nmsbackup (3)
+		&nmsbackup.NMSBackupAndRevertTask{},
+		&nmsbackup.NMSBackupAndRevert{},
+		&nmsbackup.NMSBackupAndRevertLog{},
+
+		// restapi (1)
+		&restapi.TBGDevice{},
+
+		// systemsettings (1)
+		&systemsettings.SysParameter{},
 	}
 
 	logger.Infof("auto migrating %d model tables...", len(models))
