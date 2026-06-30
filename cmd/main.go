@@ -12,20 +12,27 @@ import (
 
 	"nmsappsrv/internal/alarm"
 	"nmsappsrv/internal/cbsd"
+	"nmsappsrv/internal/blacklist"
 	"nmsappsrv/internal/config"
 	"nmsappsrv/internal/corenet"
 	"nmsappsrv/internal/device"
 	"nmsappsrv/internal/diagnostics"
 	"nmsappsrv/internal/eventlog"
 	"nmsappsrv/internal/license"
+	"nmsappsrv/internal/mail"
 	"nmsappsrv/internal/middleware"
 	"nmsappsrv/internal/misc"
 	"nmsappsrv/internal/mml"
 	"nmsappsrv/internal/monitor"
+	"nmsappsrv/internal/ntp"
 	"nmsappsrv/internal/parameter"
 	"nmsappsrv/internal/pm"
+	"nmsappsrv/internal/reboot"
+	"nmsappsrv/internal/reset"
+	"nmsappsrv/internal/security"
 	"nmsappsrv/internal/site"
 	"nmsappsrv/internal/snmp"
+	sshmod "nmsappsrv/internal/ssh"
 	"nmsappsrv/internal/upgrade"
 	"nmsappsrv/internal/tr069"
 	"nmsappsrv/internal/user"
@@ -123,6 +130,16 @@ func main() {
 	corenetH := corenet.NewHandler(db)
 	miscH := misc.NewHandler(db)
 	diagnosticsH := diagnostics.NewHandler(db)
+	rebootH := reboot.NewHandler(db)
+	resetH := reset.NewHandler(db)
+	blacklistH := blacklist.NewHandler(db)
+	ntpH := ntp.NewHandler(db)
+	sshH := sshmod.NewHandler(db)
+	mailH := mail.NewHandler(db, cfg.Mail.AESKey)
+	securityH := security.NewHandler(db)
+
+	// 启动SSH Access Timer后台过期检查
+	sshH.StartExpiredChecker()
 
 	// TR069 ACS
 	tr069MsgMgr := tr069.NewMessageManager()
@@ -198,8 +215,12 @@ func main() {
 			auth.GET("/upgrade-tasks", upgradeH.ListUpgradeTasks)
 			auth.GET("/upgrade-tasks/:id", upgradeH.GetUpgradeTask)
 			auth.GET("/upgrade-logs", upgradeH.ListUpgradeLogs)
-			auth.POST("/reboot-tasks", upgradeH.CreateRebootTask)
-			auth.GET("/reboot-tasks", upgradeH.ListRebootTasks)
+			auth.POST("/reboot-tasks", rebootH.AddRebootTask)
+			auth.GET("/reboot-tasks", rebootH.ListRebootTasks)
+			auth.DELETE("/reboot-tasks/:id", rebootH.DeleteRebootTask)
+			auth.POST("/reboot-tasks/:id/start", rebootH.StartRebootTask)
+			auth.POST("/reboot-tasks/:id/cancel", rebootH.CancelRebootTask)
+			auth.GET("/reboot-tasks/:id/results", rebootH.ListRebootTaskResults)
 			auth.POST("/rollback-tasks", upgradeH.CreateRollbackTask)
 			auth.GET("/rollback-tasks", upgradeH.ListRollbackTasks)
 
@@ -355,6 +376,21 @@ func main() {
 			auth.POST("/diagnostics/download", diagnosticsH.DiagnosticsDownload)
 			auth.POST("/diagnostics/upload", diagnosticsH.DiagnosticsUpload)
 
+			// 重启恢复
+			auth.POST("/reset-tasks", resetH.AddResetTask)
+			auth.GET("/reset-tasks", resetH.ListResetTasks)
+			auth.DELETE("/reset-tasks/:id", resetH.DeleteResetTask)
+			auth.POST("/reset-tasks/:id/start", resetH.StartResetTask)
+			auth.POST("/reset-tasks/:id/cancel", resetH.CancelResetTask)
+			auth.GET("/reset-tasks/:id/results", resetH.ListResetTaskResults)
+
+			// 设备黑名单
+			auth.POST("/blacklist/list", blacklistH.ListDeviceBlackList)
+			auth.POST("/blacklist/add", blacklistH.AddDeviceToBlackList)
+			auth.POST("/blacklist/delete", blacklistH.DeleteDeviceFromBlackList)
+			auth.POST("/blacklist/batch-delete", blacklistH.BatchDeleteDeviceFromBlackList)
+			auth.POST("/blacklist/operation-logs", blacklistH.ListBlackListOperationLog)
+
 			// 北向接口
 			auth.GET("/north-reports", miscH.ListNorthReports)
 			auth.POST("/north-reports", miscH.CreateNorthReport)
@@ -370,6 +406,34 @@ func main() {
 			auth.GET("/upload-files", miscH.ListUploadFiles)
 			auth.POST("/upload-files", miscH.CreateUploadFile)
 			auth.DELETE("/upload-files/:id", miscH.DeleteUploadFile)
+
+			// NTP
+			auth.POST("/listNTPConfig", ntpH.ListNTPConfig)
+			auth.POST("/updateNTPConfig", ntpH.UpdateNTPConfig)
+			auth.POST("/getNTPStatus", ntpH.GetNTPStatus)
+
+			// SSH Label
+			auth.POST("/addSSHLabel", sshH.AddSSHLabel)
+			auth.POST("/deleteSSHLabel", sshH.DeleteSSHLabel)
+			auth.POST("/listSSHLabels", sshH.ListSSHLabels)
+			auth.POST("/updateSSHLabel", sshH.UpdateSSHLabel)
+
+			// SSH Access Timer
+			auth.POST("/sshAccessTimer", sshH.SetSSHAccessTimer)
+			auth.POST("/listSSHAccessTimer", sshH.ListSSHAccessTimer)
+
+			// Mail
+			auth.POST("/listMailConfig", mailH.ListMailConfig)
+			auth.POST("/updateMailConfig", mailH.UpdateMailConfig)
+			auth.POST("/testMail", mailH.TestMail)
+			auth.POST("/getEmailCode", mailH.GetEmailCode)
+			auth.POST("/checkEmailCode", mailH.CheckEmailCode)
+			auth.POST("/isEnabledEmailAuthentication", mailH.IsEnabledEmailAuthentication)
+
+			// Security Rules
+			auth.POST("/getSecurityRule", securityH.GetSecurityRule)
+			auth.POST("/updateSecurityRule", securityH.UpdateSecurityRule)
+			auth.GET("/getPasswordStrategy", securityH.GetPasswordStrategy)
 		}
 	}
 

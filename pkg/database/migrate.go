@@ -13,6 +13,7 @@ import (
 	"nmsappsrv/internal/parameter"
 	"nmsappsrv/internal/pm"
 	"nmsappsrv/internal/site"
+	sshmod "nmsappsrv/internal/ssh"
 	"nmsappsrv/internal/upgrade"
 	"nmsappsrv/internal/user"
 	"nmsappsrv/pkg/logger"
@@ -155,6 +156,9 @@ func AutoMigrateAll() error {
 		&misc.CallTraceFileLog{},
 		&misc.MACPMFileLog{},
 		&misc.RPCMethod{},
+
+		// ssh (1)
+		&sshmod.SSHAccessTimerTask{},
 	}
 
 	logger.Infof("auto migrating %d model tables...", len(models))

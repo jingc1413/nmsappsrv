@@ -51,3 +51,6 @@ mq:
   snmp_queue: "nms:snmp_queue"
   web_callback_queue: "nms:web_callback_queue"
   pm_queue: "nms:pm_queue"
+
+mail:
+  aes_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"  # 64 hex chars = 32-byte AES-256 key

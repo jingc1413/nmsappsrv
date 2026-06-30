@@ -16,6 +16,7 @@ type Config struct {
 	TR069   TR069Config   `mapstructure:"tr069"`
 	SNMP    SNMPConfig    `mapstructure:"snmp"`
 	MQ      MQConfig      `mapstructure:"mq"`
+	Mail    MailConfig    `mapstructure:"mail"`
 }
 
 type ServerConfig struct {
@@ -77,6 +78,10 @@ type MQConfig struct {
 	SNMPQueue        string `mapstructure:"snmp_queue"`
 	WebCallbackQueue string `mapstructure:"web_callback_queue"`
 	PMQueue          string `mapstructure:"pm_queue"`
+}
+
+type MailConfig struct {
+	AESKey string `mapstructure:"aes_key"` // hex-encoded 32-byte AES-256 key
 }
 
 var Cfg *Config
