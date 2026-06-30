@@ -59,6 +59,14 @@ func (r *Repository) ListTasks(licenseId int, page, pageSize int) ([]NMSBackupAn
 	return tasks, total, err
 }
 
+// FindScheduledTasks returns all backup tasks that are scheduled (execute_mode=2)
+// with a non-empty cron_expr and not soft-deleted.
+func (r *Repository) FindScheduledTasks() ([]NMSBackupAndRevertTask, error) {
+	var tasks []NMSBackupAndRevertTask
+	err := r.db.Where("execute_mode = ? AND cron_expr IS NOT NULL AND cron_expr != '' AND deleted = ?", 2, false).Find(&tasks).Error
+	return tasks, err
+}
+
 // --- Backup record operations ---
 
 func (r *Repository) CreateBackupRecord(record *NMSBackupAndRevert) error {

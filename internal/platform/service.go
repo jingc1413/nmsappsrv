@@ -1,6 +1,8 @@
 package platform
 
 import (
+	"archive/zip"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -8,8 +10,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"nmsappsrv/internal/config"
+	"nmsappsrv/pkg/logger"
+	"nmsappsrv/pkg/redis"
+	"nmsappsrv/pkg/utils"
 )
 
 // Service provides platform settings operations
@@ -311,6 +320,176 @@ func maskPassword(password string) string {
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// ---------- Platform Log Collection (async) ----------
+
+// logDownloadStatus is stored in Redis as JSON for each collection task.
+type logDownloadStatus struct {
+	Status   string `json:"status"`   // "collecting" | "ready" | "failed"
+	FilePath string `json:"filePath"` // populated when status == "ready"
+	Error    string `json:"error"`    // populated when status == "failed"
+}
+
+const logDownloadKeyPrefix = "platform:log_download:"
+const logDownloadTTL = 30 * time.Minute
+
+// StartLogCollection generates a task ID, stores "collecting" status in Redis,
+// and launches a background goroutine that zips all .log files from the platform
+// log directory. Returns the task ID immediately.
+func (s *Service) StartLogCollection() (string, error) {
+	taskId := fmt.Sprintf("%d", time.Now().UnixNano())
+	key := logDownloadKeyPrefix + taskId
+
+	initial := logDownloadStatus{Status: "collecting"}
+	data, _ := json.Marshal(initial)
+	if err := redis.Set(context.Background(), key, string(data), logDownloadTTL); err != nil {
+		return "", fmt.Errorf("failed to store log collection status: %w", err)
+	}
+
+	utils.SafeGo("platform-log-collection", func() {
+		s.collectLogs(taskId)
+	})
+
+	return taskId, nil
+}
+
+// collectLogs walks the platform log directory, creates a ZIP of all .log files,
+// and updates Redis status accordingly.
+func (s *Service) collectLogs(taskId string) {
+	ctx := context.Background()
+	key := logDownloadKeyPrefix + taskId
+
+	// Determine log directory from config or use default
+	logDir := "./logs/platform"
+	if config.Cfg != nil && config.Cfg.PlatformFiles.PlatformLogDir != "" {
+		logDir = config.Cfg.PlatformFiles.PlatformLogDir
+	}
+
+	// Create temp directory for the ZIP file
+	tmpDir, err := os.MkdirTemp("", "platform-logs-")
+	if err != nil {
+		s.updateLogStatus(ctx, key, "failed", "", fmt.Sprintf("failed to create temp dir: %v", err))
+		return
+	}
+
+	zipPath := filepath.Join(tmpDir, "platform-logs.zip")
+	zipFile, err := os.Create(zipPath)
+	if err != nil {
+		s.updateLogStatus(ctx, key, "failed", "", fmt.Sprintf("failed to create zip file: %v", err))
+		return
+	}
+
+	zw := zip.NewWriter(zipFile)
+	fileCount := 0
+
+	err = filepath.Walk(logDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if filepath.Ext(path) != ".log" {
+			return nil
+		}
+
+		// Compute relative path for the archive entry
+		relPath, err := filepath.Rel(logDir, path)
+		if err != nil {
+			relPath = filepath.Base(path)
+		}
+
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			logger.Errorf("platform log collection: zip header error for %s: %v", path, err)
+			return nil // skip this file
+		}
+		header.Name = relPath
+		header.Method = zip.Deflate
+
+		writer, err := zw.CreateHeader(header)
+		if err != nil {
+			logger.Errorf("platform log collection: zip create error for %s: %v", path, err)
+			return nil
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			logger.Errorf("platform log collection: open error for %s: %v", path, err)
+			return nil
+		}
+		defer f.Close()
+
+		if _, err := io.Copy(writer, f); err != nil {
+			logger.Errorf("platform log collection: copy error for %s: %v", path, err)
+			return nil
+		}
+
+		fileCount++
+		return nil
+	})
+
+	// Close the zip writer and file
+	if closeErr := zw.Close(); closeErr != nil {
+		logger.Errorf("platform log collection: zip close error: %v", closeErr)
+	}
+	if closeErr := zipFile.Close(); closeErr != nil {
+		logger.Errorf("platform log collection: file close error: %v", closeErr)
+	}
+
+	if err != nil {
+		os.Remove(zipPath)
+		s.updateLogStatus(ctx, key, "failed", "", fmt.Sprintf("failed to walk log directory: %v", err))
+		return
+	}
+
+	if fileCount == 0 {
+		os.Remove(zipPath)
+		s.updateLogStatus(ctx, key, "failed", "", "no .log files found in "+logDir)
+		return
+	}
+
+	logger.Infof("platform log collection: zipped %d files to %s", fileCount, zipPath)
+	s.updateLogStatus(ctx, key, "ready", zipPath, "")
+}
+
+func (s *Service) updateLogStatus(ctx context.Context, key, status, filePath, errMsg string) {
+	st := logDownloadStatus{Status: status, FilePath: filePath, Error: errMsg}
+	data, _ := json.Marshal(st)
+	if err := redis.Set(ctx, key, string(data), logDownloadTTL); err != nil {
+		logger.Errorf("platform log collection: failed to update status for key %s: %v", key, err)
+	}
+}
+
+// GetLogCollectionStatus reads the current status of a log collection task from Redis.
+func (s *Service) GetLogCollectionStatus(taskId string) (status, filePath string, err error) {
+	key := logDownloadKeyPrefix + taskId
+	val, err := redis.Get(context.Background(), key)
+	if err != nil {
+		return "", "", fmt.Errorf("task not found or expired: %w", err)
+	}
+
+	var st logDownloadStatus
+	if err := json.Unmarshal([]byte(val), &st); err != nil {
+		return "", "", fmt.Errorf("invalid status data: %w", err)
+	}
+	return st.Status, st.FilePath, nil
+}
+
+// DownloadCollectedLogs checks that the task is "ready" and returns the file path.
+func (s *Service) DownloadCollectedLogs(taskId string) (string, error) {
+	status, filePath, err := s.GetLogCollectionStatus(taskId)
+	if err != nil {
+		return "", err
+	}
+	if status != "ready" {
+		return "", fmt.Errorf("logs not ready, current status: %s", status)
+	}
+	if filePath == "" {
+		return "", fmt.Errorf("file path is empty for task %s", taskId)
+	}
+	return filePath, nil
 }
 
 // commonTimezones is a representative subset of IANA timezone names

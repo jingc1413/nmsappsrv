@@ -91,8 +91,14 @@ func (h *Handler) ListBaseStationStatistics(c *gin.Context) {
 		return
 	}
 
+	tenancyId := middleware.GetLicenseId(c)
+	var tenancyIdPtr *int
+	if tenancyId > 0 {
+		tenancyIdPtr = &tenancyId
+	}
+
 	ctx := context.Background()
-	data, err := h.svc.ListBaseStationStatistics(ctx, req.ElementIds, *req.StartTime, *req.EndTime)
+	data, err := h.svc.ListBaseStationStatistics(ctx, tenancyIdPtr, req.ElementIds, *req.StartTime, *req.EndTime)
 	if err != nil {
 		utils.Error(c, 500, err.Error())
 		return
@@ -164,8 +170,14 @@ func (h *Handler) StatisticKPIForDevicelop(c *gin.Context) {
 		return
 	}
 
+	tenancyId := middleware.GetLicenseId(c)
+	var tenancyIdPtr *int
+	if tenancyId > 0 {
+		tenancyIdPtr = &tenancyId
+	}
+
 	ctx := context.Background()
-	data, err := h.svc.StatisticKPIForDevicelop(ctx, req.DeviceGroupId, req.Granularity, req.Gmt, req.Timestamp)
+	data, err := h.svc.StatisticKPIForDevicelop(ctx, tenancyIdPtr, req.DeviceGroupId, req.Granularity, req.Gmt, req.Timestamp)
 	if err != nil {
 		utils.Error(c, 500, err.Error())
 		return

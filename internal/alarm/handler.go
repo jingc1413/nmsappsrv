@@ -73,6 +73,31 @@ func (h *Handler) ClearAlarm(c *gin.Context) {
 	utils.Success(c, nil)
 }
 
+// BatchClearRequest is the JSON body for PUT /alarms/batch-clear.
+type BatchClearRequest struct {
+	AlarmIds  []int64 `json:"alarmIds" binding:"required"`
+	ClearUser string  `json:"clearUser"`
+}
+
+// BatchClearAlarms handles PUT /alarms/batch-clear
+func (h *Handler) BatchClearAlarms(c *gin.Context) {
+	var req BatchClearRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.Error(c, http.StatusBadRequest, "invalid request body: alarmIds is required")
+		return
+	}
+
+	cleared, notFound, err := h.svc.BatchClearAlarms(req.AlarmIds, req.ClearUser)
+	if err != nil {
+		utils.Error(c, http.StatusInternalServerError, "failed to batch clear alarms")
+		return
+	}
+	utils.OK(c, map[string]interface{}{
+		"clearedCount": cleared,
+		"notFoundIds":  notFound,
+	})
+}
+
 // ---------------------------------------------------------------------------
 // AlarmLibrary endpoints
 // ---------------------------------------------------------------------------

@@ -174,6 +174,28 @@ func (s *Service) IsEmailAuthEnabled() (bool, error) {
 	return cfg.MailAuthentication, nil
 }
 
+// SendMail sends an email to the given recipients using the stored mail config.
+// This is the public entry point used by other modules (e.g. alarm notifier).
+func (s *Service) SendMail(to []string, subject, body string) error {
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return fmt.Errorf("load mail config: %w", err)
+	}
+	username := s.decrypt(cfg.Username)
+	password := s.decrypt(cfg.Password)
+	return s.sendMail(cfg, username, password, to, subject, body)
+}
+
+// GetSuperUserEmail returns the decrypted super-user email addresses
+// (semicolon-separated) from the mail configuration.
+func (s *Service) GetSuperUserEmail() (string, error) {
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return "", err
+	}
+	return s.decrypt(cfg.SuperUserEmail), nil
+}
+
 // ---------- repository helpers ----------
 
 func (s *Service) loadConfig() (*MailConfig, error) {

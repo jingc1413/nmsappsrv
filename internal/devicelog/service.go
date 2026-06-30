@@ -7,6 +7,7 @@ import (
 	"nmsappsrv/internal/middleware"
 	"nmsappsrv/pkg/logger"
 	"nmsappsrv/pkg/redis"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -78,20 +79,34 @@ func (s *Service) ListLogCollectionResults(c *gin.Context, req *ListLogCollectio
 }
 
 func (s *Service) DeleteAllLogFile(req *DeleteAllLogFileRequest) error {
+	// Fetch all log records first to get file paths for physical file deletion
+	logs, err := s.repo.FindAllByElementId(req.ElementId)
+	if err != nil {
+		logger.Errorf("FindAllByElementId error: %v", err)
+		return err
+	}
+
+	// Delete physical log files from disk
+	for _, log := range logs {
+		if log.FilePath != nil && *log.FilePath != "" {
+			if err := os.Remove(*log.FilePath); err != nil {
+				logger.Warnf("Failed to delete log file %s: %v", *log.FilePath, err)
+			}
+		}
+	}
+
 	// Delete all ne_log records for this elementId
 	if err := s.repo.DeleteByElementId(req.ElementId); err != nil {
 		logger.Errorf("DeleteByElementId error: %v", err)
 		return err
 	}
 
-	// TODO: Delete actual log files from disk if needed
-
 	return nil
 }
 
 func (s *Service) DeleteLogFile(req *DeleteLogFileRequest) error {
 	// Get log record first
-	_, err := s.repo.FindById(req.LogId)
+	log, err := s.repo.FindById(req.LogId)
 	if err != nil {
 		return err
 	}
@@ -102,7 +117,12 @@ func (s *Service) DeleteLogFile(req *DeleteLogFileRequest) error {
 		return err
 	}
 
-	// TODO: Delete actual file from disk if log.FilePath is set
+	// Delete actual file from disk if log.FilePath is set
+	if log.FilePath != nil && *log.FilePath != "" {
+		if err := os.Remove(*log.FilePath); err != nil {
+			logger.Warnf("Failed to delete log file %s: %v", *log.FilePath, err)
+		}
+	}
 
 	return nil
 }

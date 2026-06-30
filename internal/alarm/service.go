@@ -3,6 +3,8 @@ package alarm
 import (
 	"time"
 
+	"nmsappsrv/pkg/logger"
+
 	"gorm.io/gorm"
 )
 
@@ -41,6 +43,174 @@ func (s *Service) GetAlarm(id int64) (*Alarm, error) {
 // ClearAlarm marks an alarm as cleared with the current timestamp.
 func (s *Service) ClearAlarm(id int64) error {
 	return s.repo.ClearAlarm(id, time.Now())
+}
+
+// BatchClearAlarms clears multiple alarms in a single transaction. It returns
+// the count of cleared alarms and any IDs that were not found in the database.
+func (s *Service) BatchClearAlarms(alarmIds []int64, clearUser string) (int64, []int64, error) {
+	return s.repo.BatchClearAlarms(alarmIds, clearUser, time.Now())
+}
+
+// CreateAlarm inserts a new alarm after checking alarm suppression rules. If
+// the alarm matches an active filter it is still created but marked as
+// suppressed so the creation is not silently lost.
+func (s *Service) CreateAlarm(a *Alarm) error {
+	// Check suppression before inserting.
+	suppressed, reason := s.CheckAlarmSuppression(a)
+	if suppressed {
+		t := true
+		a.IsSuppressed = &t
+		a.SuppressionReason = &reason
+		logger.Infof("Alarm suppressed: reason=%s, source=%v, identifier=%v",
+			reason, a.AlarmSource, a.AlarmIdentifier)
+	}
+	return s.repo.CreateAlarm(a)
+}
+
+// CheckAlarmSuppression checks whether the given alarm matches any active
+// alarm filter. It returns suppressed=true and the matching filter name when
+// a match is found.
+//
+// Matching rules:
+//  1. Time range: the alarm's event_time must fall within the filter's
+//     start_time / end_time window (if both are set).
+//  2. Alarm source / device: if the filter has ExecutionOnAllAlarm=false,
+//     the alarm's element_id must appear in the filter's device list
+//     (alarm_filter_has_device) or the alarm's alarm_source must match one
+//     of the filter's AlarmSources entries.
+//  3. Alarm identifier: if the filter is not set to match all alarms, the
+//     alarm's alarm_id must appear in the filter's alarm list
+//     (alarm_filter_has_alarm).
+func (s *Service) CheckAlarmSuppression(alarm *Alarm) (bool, string) {
+	licenseId := 0
+	if alarm.LicenseId != nil {
+		licenseId = *alarm.LicenseId
+	}
+
+	filters, err := s.repo.FindActiveAlarmFilters(licenseId)
+	if err != nil {
+		logger.Errorf("CheckAlarmSuppression: failed to query filters: %v", err)
+		return false, ""
+	}
+
+	for _, f := range filters {
+		// 1. Time range check.
+		if f.StartTime != nil && alarm.EventTime != nil && alarm.EventTime.Before(*f.StartTime) {
+			continue
+		}
+		if f.EndTime != nil && alarm.EventTime != nil && alarm.EventTime.After(*f.EndTime) {
+			continue
+		}
+
+		// 2. Alarm identifier check (skip if filter matches all alarms).
+		allAlarms := f.ExecutionOnAllAlarm != nil && *f.ExecutionOnAllAlarm
+		if !allAlarms {
+			filterAlarmIds, err := s.repo.FindAlarmFilterAlarms(f.Id)
+			if err != nil {
+				logger.Errorf("CheckAlarmSuppression: failed to query filter alarms: %v", err)
+				continue
+			}
+			if alarm.AlarmId != nil && !containsString(filterAlarmIds, *alarm.AlarmId) {
+				continue
+			}
+			if alarm.AlarmId == nil {
+				continue
+			}
+		}
+
+		// 3. Device / source check (skip if filter targets all devices).
+		allBaseStation := f.ExecuteOnAllBaseStation != nil && *f.ExecuteOnAllBaseStation
+		allCPE := f.ExecuteOnAllCPE != nil && *f.ExecuteOnAllCPE
+		if !allBaseStation && !allCPE {
+			// Check explicit device list.
+			filterDevices, err := s.repo.FindAlarmFilterDevices(f.Id)
+			if err != nil {
+				logger.Errorf("CheckAlarmSuppression: failed to query filter devices: %v", err)
+				continue
+			}
+			deviceMatch := false
+			if alarm.ElementId != nil && containsInt64(filterDevices, *alarm.ElementId) {
+				deviceMatch = true
+			}
+			// Check alarm source string match.
+			if !deviceMatch && f.AlarmSources != nil && alarm.AlarmSource != nil {
+				if containsString(splitCSV(*f.AlarmSources), *alarm.AlarmSource) {
+					deviceMatch = true
+				}
+			}
+			if !deviceMatch {
+				continue
+			}
+		}
+
+		// All conditions matched — alarm is suppressed.
+		filterName := ""
+		if f.FilterRuleName != nil {
+			filterName = *f.FilterRuleName
+		}
+		return true, filterName
+	}
+
+	return false, ""
+}
+
+// containsString checks whether a string slice contains the target.
+func containsString(slice []string, target string) bool {
+	for _, s := range slice {
+		if s == target {
+			return true
+		}
+	}
+	return false
+}
+
+// containsInt64 checks whether an int64 slice contains the target.
+func containsInt64(slice []int64, target int64) bool {
+	for _, v := range slice {
+		if v == target {
+			return true
+		}
+	}
+	return false
+}
+
+// splitCSV splits a comma-separated string into trimmed non-empty tokens.
+func splitCSV(s string) []string {
+	var result []string
+	for _, part := range splitString(s, ',') {
+		trimmed := trimSpace(part)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+// splitString splits s on the given separator without importing strings.
+func splitString(s string, sep byte) []string {
+	var parts []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == sep {
+			parts = append(parts, s[start:i])
+			start = i + 1
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
+}
+
+// trimSpace removes leading/trailing whitespace.
+func trimSpace(s string) string {
+	start := 0
+	for start < len(s) && (s[start] == ' ' || s[start] == '\t') {
+		start++
+	}
+	end := len(s)
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	return s[start:end]
 }
 
 // ---------------------------------------------------------------------------

@@ -23,6 +23,9 @@ type Alarm struct {
 	CreateTime            *time.Time `gorm:"column:create_time" json:"create_time"`
 	AdditionalInformation *string    `gorm:"column:additional_information;type:text" json:"additional_information"`
 	AlarmTemplateId       *int       `gorm:"column:alarm_template_id" json:"alarm_template_id"`
+	ClearUser             *string    `gorm:"column:clear_user;type:varchar(255)" json:"clear_user"`
+	IsSuppressed          *bool      `gorm:"column:is_suppressed" json:"is_suppressed"`
+	SuppressionReason     *string    `gorm:"column:suppression_reason;type:varchar(255)" json:"suppression_reason"`
 }
 
 func (Alarm) TableName() string { return "alarm" }

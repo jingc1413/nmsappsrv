@@ -1,6 +1,7 @@
 package snmp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -10,7 +11,9 @@ import (
 	"github.com/gosnmp/gosnmp"
 	"gorm.io/gorm"
 	"nmsappsrv/internal/device"
+	"nmsappsrv/internal/mq"
 	"nmsappsrv/pkg/logger"
+	redisclient "nmsappsrv/pkg/redis"
 	"nmsappsrv/pkg/utils"
 )
 
@@ -154,6 +157,11 @@ func (r *TrapReceiver) processHATrap(packet *gosnmp.SnmpPacket, params []SnmpPar
 			logger.Errorf("Failed to create HA alarm record: %v", err)
 		} else {
 			logger.Infof("HA alarm record created for NMS: %s", nmsName)
+			// Publish the new alarm ID for email notification.
+			var newAlarmID int64
+			if err := r.db.Table("alarm").Order("id DESC").Limit(1).Pluck("id", &newAlarmID).Error; err == nil && newAlarmID > 0 {
+				_ = redisclient.Publish(context.Background(), mq.ChannelAlarmNotify, fmt.Sprintf("%d", newAlarmID))
+			}
 		}
 	}
 }

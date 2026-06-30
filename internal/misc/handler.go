@@ -1,12 +1,15 @@
 package misc
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 
+	"nmsappsrv/internal/device"
 	"nmsappsrv/internal/middleware"
+	"nmsappsrv/pkg/logger"
 	"nmsappsrv/pkg/utils"
 
 	"gorm.io/gorm"
@@ -14,12 +17,15 @@ import (
 
 // Handler exposes HTTP handlers for miscellaneous endpoints.
 type Handler struct {
+	db  *gorm.DB
 	svc *Service
+	// EnqueueZTPFunc is injected from main to avoid an import cycle with tr069.
+	EnqueueZTPFunc func(ctx context.Context, elementId int64, serialNumber, operationType, operationUser string) error
 }
 
 // NewHandler creates a Handler backed by a fresh Service.
 func NewHandler(db *gorm.DB) *Handler {
-	return &Handler{svc: NewService(db)}
+	return &Handler{db: db, svc: NewService(db)}
 }
 
 // getTenancyId extracts tenancy_id from gin context as int.
@@ -282,6 +288,44 @@ func (h *Handler) DeleteZTPFiles(c *gin.Context) {
 		return
 	}
 	utils.Success(c, nil)
+}
+
+// ProvisionZTP handles POST /ztp/provision — enqueues ZTP provisioning tasks.
+func (h *Handler) ProvisionZTP(c *gin.Context) {
+	var req struct {
+		ElementIds    []int64 `json:"elementIds" binding:"required"`
+		OperationUser string  `json:"operationUser"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		utils.OK(c, map[string]string{"error": "invalid request: " + err.Error()})
+		return
+	}
+
+	ctx := context.Background()
+	enqueued := 0
+	for _, elementId := range req.ElementIds {
+		// Look up device serial number
+		var dev device.CpeElement
+		if err := h.db.Select("ne_neid, serial_number").Where("ne_neid = ? AND deleted = ?", elementId, false).First(&dev).Error; err != nil {
+			logger.Warnf("ztp provision: device %d not found: %v", elementId, err)
+			continue
+		}
+		if dev.SerialNumber == nil || *dev.SerialNumber == "" {
+			logger.Warnf("ztp provision: device %d has no serial number", elementId)
+			continue
+		}
+
+		if err := h.EnqueueZTPFunc(ctx, elementId, *dev.SerialNumber, "provision", req.OperationUser); err != nil {
+			logger.Errorf("ztp provision: failed to enqueue device %d: %v", elementId, err)
+			continue
+		}
+		enqueued++
+	}
+
+	utils.OK(c, map[string]interface{}{
+		"enqueued": enqueued,
+		"total":    len(req.ElementIds),
+	})
 }
 
 func (h *Handler) ListNorthReports(c *gin.Context) {

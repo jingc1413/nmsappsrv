@@ -9,6 +9,7 @@ import (
 
 	"nmsappsrv/internal/alarm"
 	"nmsappsrv/internal/device"
+	"nmsappsrv/internal/mq"
 	"nmsappsrv/pkg/logger"
 	"nmsappsrv/pkg/redis"
 	"nmsappsrv/pkg/utils"
@@ -178,6 +179,12 @@ func (w *OfflineWorker) createOfflineAlarm(dev *device.CpeElement, now *time.Tim
 		sn = *dev.SerialNumber
 	}
 	logger.Infof("offline worker: created offline alarm for device %d (SN=%s)", dev.NeNeid, sn)
+
+	// Publish the new alarm ID for email notification.
+	if newAlarm.Id > 0 {
+		_ = redis.Publish(context.Background(), mq.ChannelAlarmNotify, fmt.Sprintf("%d", newAlarm.Id))
+	}
+
 	return true
 }
 

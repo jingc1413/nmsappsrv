@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"context"
@@ -37,11 +37,13 @@ import (
 	"nmsappsrv/internal/reboot"
 	"nmsappsrv/internal/reset"
 	"nmsappsrv/internal/resources"
+	"nmsappsrv/internal/scheduler"
 	"nmsappsrv/internal/restapi"
 	"nmsappsrv/internal/security"
 	"nmsappsrv/internal/site"
 	"nmsappsrv/internal/snmp"
 	sshmod "nmsappsrv/internal/ssh"
+	"nmsappsrv/internal/websocket"
 	"nmsappsrv/internal/systemsettings"
 	"nmsappsrv/internal/tenancy"
 	"nmsappsrv/internal/tr069"
@@ -140,6 +142,7 @@ func main() {
 	cbsdH := cbsd.NewHandler(db)
 	corenetH := corenet.NewHandler(db)
 	miscH := misc.NewHandler(db)
+	miscH.EnqueueZTPFunc = tr069.EnqueueZTPProvision
 	diagnosticsH := diagnostics.NewHandler(db)
 	rebootH := reboot.NewHandler(db)
 	resetH := reset.NewHandler(db)
@@ -147,6 +150,8 @@ func main() {
 	ntpH := ntp.NewHandler(db)
 	sshH := sshmod.NewHandler(db)
 	mailH := mail.NewHandler(db, cfg.Mail.AESKey)
+	mailSvc := mail.NewService(db, cfg.Mail.AESKey)
+	alarmNotifier := alarm.NewAlarmNotifier(db, mailSvc)
 	securityH := security.NewHandler(db)
 	shutdownH := upgrade.NewShutdownHandler(db)
 	systemsettingsH := systemsettings.NewSystemSettingsHandler(db, cfg.Mail.AESKey)
@@ -155,6 +160,13 @@ func main() {
 	nmsbackupRepo := nmsbackup.NewRepository(db)
 	nmsbackupSvc := nmsbackup.NewService(nmsbackupRepo)
 	nmsbackupH := nmsbackup.NewHandler(nmsbackupSvc)
+
+	// Unified cron scheduler — manages all cron-based periodic jobs
+	mainScheduler := scheduler.NewScheduler(db)
+
+	// Register NMS backup cron jobs from stored cron_expr
+	backupSched := nmsbackup.NewBackupScheduler(nmsbackupRepo, nmsbackupSvc)
+	backupSched.RegisterBackupJobs(mainScheduler)
 	restapiRepo := restapi.NewRepository(db)
 	restapiSvc := restapi.NewService(restapiRepo)
 	restapiH := restapi.NewHandler(restapiSvc)
@@ -162,10 +174,20 @@ func main() {
 	// Second batch modules
 	healthH := health.NewHandler(db)
 	resourcesH := resources.NewHandler(db)
-	platformH := platform.NewHandler(db, cfg.Mail.AESKey)
+	platformH := platform.NewHandler(db, cfg.Mail.AESKey, cfg.PlatformFiles)
 	tenancyH := tenancy.NewHandler(db)
 	cacertH := cacert.NewHandler(db)
 	dashboardH := dashboard.NewHandler(db)
+
+	// ========== WebSocket ==========
+	wsHub := websocket.NewHub()
+	utils.SafeGo("ws-hub", func() { wsHub.Run() })
+	wsH := websocket.NewWSHandler(wsHub)
+	wsBridge := websocket.NewBridge(wsHub, db)
+	wsBridge.Start()
+
+	// WebSocket route (no auth required)
+	router.GET("/ws", wsH.ServeWS)
 
 	// 启动SSH Access Timer后台过期检查
 	sshH.StartExpiredChecker()
@@ -211,6 +233,7 @@ func main() {
 			auth.GET("/alarms", alarmH.ListAlarms)
 			auth.GET("/alarms/:id", alarmH.GetAlarm)
 			auth.POST("/alarms/:id/clear", alarmH.ClearAlarm)
+			auth.PUT("/alarms/batch-clear", alarmH.BatchClearAlarms)
 			auth.GET("/alarm-library", alarmH.ListAlarmLibrary)
 			auth.GET("/alarm-templates", alarmH.ListAlarmTemplates)
 			auth.POST("/alarm-templates", alarmH.CreateAlarmTemplate)
@@ -335,43 +358,7 @@ func main() {
 			auth.GET("/batch-add-object/tasks/:taskId/detail", miscH.ListBatchAddObjectTaskDetail)
 
 			// ZTP
-			// ZTP provision: enqueue devices to the ZTP worker queue
-			auth.POST("/ztp/provision", func(c *gin.Context) {
-				var req struct {
-					ElementIds    []int64 `json:"elementIds" binding:"required"`
-					OperationUser string  `json:"operationUser"`
-				}
-				if err := c.ShouldBindJSON(&req); err != nil {
-					utils.OK(c, map[string]string{"error": "invalid request: " + err.Error()})
-					return
-				}
-
-				ctx := context.Background()
-				enqueued := 0
-				for _, elementId := range req.ElementIds {
-					// Look up device serial number
-					var dev device.CpeElement
-					if err := db.Select("ne_neid, serial_number").Where("ne_neid = ? AND deleted = ?", elementId, false).First(&dev).Error; err != nil {
-						logger.Warnf("ztp provision: device %d not found: %v", elementId, err)
-						continue
-					}
-					if dev.SerialNumber == nil || *dev.SerialNumber == "" {
-						logger.Warnf("ztp provision: device %d has no serial number", elementId)
-						continue
-					}
-
-					if err := tr069.EnqueueZTPProvision(ctx, elementId, *dev.SerialNumber, "provision", req.OperationUser); err != nil {
-						logger.Errorf("ztp provision: failed to enqueue device %d: %v", elementId, err)
-						continue
-					}
-					enqueued++
-				}
-
-				utils.OK(c, map[string]interface{}{
-					"enqueued": enqueued,
-					"total":    len(req.ElementIds),
-				})
-			})
+			auth.POST("/ztp/provision", miscH.ProvisionZTP)
 			auth.GET("/ztp/logs", miscH.ListZTPLogs)
 			auth.GET("/ztp/setting", miscH.GetZTPSetting)
 			auth.POST("/ztp/setting", miscH.SaveZTPSetting)
@@ -702,9 +689,28 @@ func main() {
 	ztpWorker := tr069.NewZTPWorker(db, tr069MsgMgr)
 	ztpWorker.Start()
 
+	// Upgrade worker (consumes queue:upgrade and dispatches TR-069 Download/Reboot)
+	tr069OpSender := tr069.NewOperationSender(db, tr069MsgMgr)
+	upgradeWorker := upgrade.NewUpgradeWorker(db, tr069OpSender)
+	upgradeWorker.Start()
+
+	// MML command worker (consumes queue:mml and dispatches MML commands via TR-069)
+	mmlWorker := mml.NewMMLWorker(db, tr069MsgMgr)
+	mmlWorker.Start()
+
 	// Parameter collection scheduler (periodically sends GPV to configured devices)
 	paramScheduler := parameter.NewScheduler(db)
 	paramScheduler.Start()
+
+	// System resource collector (samples CPU/memory every 30s, caches to Redis)
+	resourceCollector := resources.NewCollector()
+	resourceCollector.Start()
+
+	// Start unified cron scheduler (NMS backup jobs, etc.)
+	mainScheduler.Start()
+
+	// Alarm email notifier (subscribes to channel:alarm:notify)
+	alarmNotifier.Start()
 
 	// STUN server (stores device NAT addresses in Redis for connection requests)
 	if cfg.STUN.Enabled {
@@ -732,10 +738,16 @@ func main() {
 	logger.Info("shutting down server...")
 
 	// Stop background workers
+	wsBridge.Stop()
 	snmpWorker.Stop()
 	offlineWorker.Stop()
 	ztpWorker.Stop()
+	mmlWorker.Stop()
+	upgradeWorker.Stop()
 	paramScheduler.Stop()
+	resourceCollector.Stop()
+	alarmNotifier.Stop()
+	mainScheduler.Stop()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -113,6 +113,17 @@ func (w *Worker) pollLoop() {
 			} else {
 				logger.Info("SNMP worker SET completed")
 			}
+		case OperationWalk:
+			oids := make([]string, 0, len(msg.Payload))
+			for _, p := range msg.Payload {
+				oids = append(oids, p.OID)
+			}
+			results, err := SendWalk(msg.ConnectionInfo, oids, w.db)
+			if err != nil {
+				logger.Errorf("SNMP worker failed to send WALK: %v", err)
+			} else {
+				logger.Infof("SNMP worker WALK completed, %d results", len(results))
+			}
 		default:
 			logger.Warnf("SNMP worker: unsupported operation type: %d", msg.OperationType)
 		}

@@ -77,6 +77,77 @@ func (r *Repository) ClearAlarm(id int64, clearedTime time.Time) error {
 		}).Error
 }
 
+// BatchClearAlarms clears multiple alarms in a single transaction. It returns
+// the number of alarms actually cleared and the IDs that were not found.
+func (r *Repository) BatchClearAlarms(ids []int64, clearUser string, clearedTime time.Time) (int64, []int64, error) {
+	var clearedCount int64
+	var notFoundIds []int64
+
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		for _, id := range ids {
+			result := tx.Model(&Alarm{}).Where("id = ?", id).
+				Updates(map[string]interface{}{
+					"alarm_status": 0,
+					"cleared_time": clearedTime,
+					"clear_user":   clearUser,
+				})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				notFoundIds = append(notFoundIds, id)
+			} else {
+				clearedCount++
+			}
+		}
+		return nil
+	})
+	return clearedCount, notFoundIds, err
+}
+
+// FindActiveAlarmFilters returns all enabled alarm filters for the given
+// license. These are used to check whether a new alarm should be suppressed.
+func (r *Repository) FindActiveAlarmFilters(licenseId int) ([]AlarmFilter, error) {
+	var filters []AlarmFilter
+	enabled := true
+	if err := r.db.Where("license_id = ? AND enable = ?", licenseId, enabled).Find(&filters).Error; err != nil {
+		return nil, err
+	}
+	return filters, nil
+}
+
+// FindAlarmFilterDevices returns the device IDs associated with a given filter
+// from the alarm_filter_has_device table.
+func (r *Repository) FindAlarmFilterDevices(filterId int) ([]int64, error) {
+	var devices []AlarmFilterHasDevice
+	if err := r.db.Where("alarm_filter_id = ?", filterId).Find(&devices).Error; err != nil {
+		return nil, err
+	}
+	var elementIds []int64
+	for _, d := range devices {
+		if d.ElementId != nil {
+			elementIds = append(elementIds, *d.ElementId)
+		}
+	}
+	return elementIds, nil
+}
+
+// FindAlarmFilterAlarms returns the alarm identifiers associated with a given
+// filter from the alarm_filter_has_alarm table.
+func (r *Repository) FindAlarmFilterAlarms(filterId int) ([]string, error) {
+	var alarms []AlarmFilterHasAlarm
+	if err := r.db.Where("alarm_filter_id = ?", filterId).Find(&alarms).Error; err != nil {
+		return nil, err
+	}
+	var alarmIds []string
+	for _, a := range alarms {
+		if a.AlarmId != nil {
+			alarmIds = append(alarmIds, *a.AlarmId)
+		}
+	}
+	return alarmIds, nil
+}
+
 // ---------------------------------------------------------------------------
 // AlarmLibrary
 // ---------------------------------------------------------------------------

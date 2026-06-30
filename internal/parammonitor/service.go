@@ -25,6 +25,80 @@ func NewService(db *gorm.DB) *Service {
 	}
 }
 
+// countDevices calculates the actual device count based on scope and scope_data.
+// scope=1: all devices; scope=2: selected (elementIds or groupIds in scope_data).
+func (s *Service) countDevices(scope int, scopeData *string) int {
+	if scope == 1 {
+		var count int64
+		s.repo.db.Table("cpe_element").Where("deleted = ?", false).Count(&count)
+		return int(count)
+	}
+
+	if scopeData == nil || *scopeData == "" {
+		return 0
+	}
+
+	var ids []int64
+	if err := json.Unmarshal([]byte(*scopeData), &ids); err != nil || len(ids) == 0 {
+		return 0
+	}
+
+	// Check if IDs are group IDs by looking in device_group table.
+	// If matches found, count via group_has_element; otherwise treat as element IDs.
+	var groupCount int64
+	s.repo.db.Table("device_group").
+		Where("id IN ?", ids).
+		Count(&groupCount)
+
+	if groupCount > 0 {
+		var elementCount int64
+		s.repo.db.Table("group_has_element").
+			Where("group_id IN ?", ids).
+			Count(&elementCount)
+		return int(elementCount)
+	}
+
+	return len(ids)
+}
+
+// resolveScopeToElementIds resolves a monitor config's scope to actual element IDs.
+// scope=1: all non-deleted devices; scope=2: parse scope_data (handles both elementIds and groupIds).
+func (s *Service) resolveScopeToElementIds(scope int, scopeData *string) ([]int64, error) {
+	if scope == 1 {
+		var elementIds []int64
+		err := s.repo.db.Table("cpe_element").
+			Where("deleted = ?", false).
+			Pluck("ne_neid", &elementIds).Error
+		return elementIds, err
+	}
+
+	if scopeData == nil || *scopeData == "" {
+		return nil, nil
+	}
+
+	var ids []int64
+	if err := json.Unmarshal([]byte(*scopeData), &ids); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	// Check if IDs are group IDs
+	var groupCount int64
+	s.repo.db.Table("device_group").Where("id IN ?", ids).Count(&groupCount)
+
+	if groupCount > 0 {
+		var elementIds []int64
+		err := s.repo.db.Table("group_has_element").
+			Where("group_id IN ?", ids).
+			Pluck("element_id", &elementIds).Error
+		return elementIds, err
+	}
+
+	return ids, nil
+}
+
 func (s *Service) AddMonitorConfig(c *gin.Context, req *AddMonitorConfigRequest) error {
 	licenseId := middleware.GetLicenseId(c)
 	now := time.Now()
@@ -165,6 +239,11 @@ func (s *Service) ListMonitorConfigs(c *gin.Context, req *ListMonitorConfigReque
 	for _, config := range configs {
 		paramIds, _ := s.repo.GetConfigParameters(config.Id)
 
+		deviceCount := 0
+		if config.Scope != nil {
+			deviceCount = s.countDevices(*config.Scope, config.ScopeData)
+		}
+
 		vo := MonitorConfigVo{
 			Id:           config.Id,
 			Name:         *config.Name,
@@ -172,7 +251,7 @@ func (s *Service) ListMonitorConfigs(c *gin.Context, req *ListMonitorConfigReque
 			Scope:        *config.Scope,
 			Interval:     *config.Interval,
 			ParameterIds: paramIds,
-			DeviceCount:  0, // TODO: calculate device count based on scope
+			DeviceCount:  deviceCount,
 			CreateTime:   config.CreateTime.Format("2006-01-02 15:04:05"),
 		}
 		result = append(result, vo)
@@ -200,13 +279,14 @@ func (s *Service) GetRealtimeMonitorData(req *RealtimeMonitorDataRequest) ([]Rea
 		return nil, err
 	}
 
-	// Get devices in scope
-	var elementIds []int64
-	if config.ScopeData != nil && *config.ScopeData != "" {
-		if err := json.Unmarshal([]byte(*config.ScopeData), &elementIds); err != nil {
-			logger.Errorf("Unmarshal scope_data error: %v", err)
-			return nil, err
-		}
+	// Get devices in scope (handles both elementIds and groupIds)
+	scope := 0
+	if config.Scope != nil {
+		scope = *config.Scope
+	}
+	elementIds, err := s.resolveScopeToElementIds(scope, config.ScopeData)
+	if err != nil {
+		return nil, err
 	}
 
 	// Get parameter IDs for this config
@@ -247,10 +327,15 @@ func (s *Service) GetRealtimeMonitorData(req *RealtimeMonitorDataRequest) ([]Rea
 				Where("id = ?", paramId).
 				First(&attr).Error
 			if err == nil && attr.ParameterName != nil {
-				// TODO: Read actual parameter value from device cache or real-time query
+				// Read actual parameter value from element_basic_info_parameter
+				var paramValue string
+				s.repo.db.Table("element_basic_info_parameter").
+					Where("element_id = ? AND param_name = ?", elementId, *attr.ParameterName).
+					Pluck("param_value", &paramValue)
+
 				parameters = append(parameters, ParameterValueVo{
 					ParameterName: *attr.ParameterName,
-					Value:         "", // Placeholder - would come from device
+					Value:         paramValue,
 				})
 			}
 		}
@@ -347,12 +432,18 @@ func (s *Service) BatchQueryDeviceParameters(req *BatchQueryDeviceParamRequest) 
 				ParameterName *string `gorm:"column:parameter_name"`
 			}
 			err := s.repo.db.Table("parameter_attributes").
-				Where("element_id = ? AND id = ?", elementId, paramId).
+				Where("id = ?", paramId).
 				First(&attr).Error
 			if err == nil && attr.ParameterName != nil {
+				// Read actual parameter value from element_basic_info_parameter
+				var paramValue string
+				s.repo.db.Table("element_basic_info_parameter").
+					Where("element_id = ? AND param_name = ?", elementId, path).
+					Pluck("param_value", &paramValue)
+
 				parameters = append(parameters, ParameterValueVo{
 					ParameterName: *attr.ParameterName,
-					Value:         path, // Placeholder
+					Value:         paramValue,
 				})
 			}
 		}

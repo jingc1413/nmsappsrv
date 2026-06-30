@@ -2,7 +2,14 @@ package resources
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
+
+	"nmsappsrv/pkg/logger"
+
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/mem"
 )
 
 // Service provides resource monitoring operations
@@ -17,10 +24,26 @@ func NewService(repo *Repository) *Service {
 
 // GetCpuAndMemUsage returns current CPU and memory usage
 func (s *Service) GetCpuAndMemUsage() ResourcesVO {
-	// TODO: integrate actual OS-level CPU/memory sampling
+	cpuUsage := 0.0
+	memUsage := 0.0
+
+	percent, err := cpu.Percent(1*time.Second, false)
+	if err != nil {
+		logger.Warnf("failed to sample CPU usage: %v", err)
+	} else if len(percent) > 0 {
+		cpuUsage = percent[0]
+	}
+
+	v, err := mem.VirtualMemory()
+	if err != nil {
+		logger.Warnf("failed to sample memory usage: %v", err)
+	} else {
+		memUsage = v.UsedPercent
+	}
+
 	return ResourcesVO{
-		CPU:       0.0,
-		Mem:       0.0,
+		CPU:       cpuUsage,
+		Mem:       memUsage,
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
 }
@@ -32,8 +55,45 @@ func (s *Service) GetTableStatus() ([]TableStatusVO, error) {
 
 // GetDiskUsage returns disk partition usage
 func (s *Service) GetDiskUsage() []DiskUsageVO {
-	// TODO: integrate actual disk usage sampling (e.g. syscall.Statfs)
-	return []DiskUsageVO{}
+	result := []DiskUsageVO{}
+
+	partitions, err := disk.Partitions(false)
+	if err != nil {
+		logger.Warnf("failed to list disk partitions: %v", err)
+		return result
+	}
+
+	for _, p := range partitions {
+		usage, err := disk.Usage(p.Mountpoint)
+		if err != nil {
+			logger.Warnf("failed to get disk usage for %s: %v", p.Mountpoint, err)
+			continue
+		}
+		result = append(result, DiskUsageVO{
+			Filesystem: p.Device,
+			Size:       formatBytes(usage.Total),
+			Used:       formatBytes(usage.Used),
+			Avail:      formatBytes(usage.Free),
+			UsePercent: fmt.Sprintf("%.1f%%", usage.UsedPercent),
+			MountPoint: p.Mountpoint,
+		})
+	}
+
+	return result
+}
+
+// formatBytes converts bytes to a human-readable string (e.g. "1.5 GB")
+func formatBytes(b uint64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := uint64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %s", float64(b)/float64(div), []string{"KB", "MB", "GB", "TB", "PB"}[exp])
 }
 
 // GetThreshold returns alarm threshold configuration

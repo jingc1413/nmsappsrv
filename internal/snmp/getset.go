@@ -96,6 +96,60 @@ func SendSet(db *gorm.DB, connInfo SnmpConnectionInfo, params []SnmpParameter) e
 	return nil
 }
 
+// SendWalk performs an SNMP Walk (GETNEXT/GETBULK) operation.
+// It walks the OID tree starting from the given OID and returns all values.
+func SendWalk(connInfo SnmpConnectionInfo, oids []string, db *gorm.DB) ([]SnmpParameter, error) {
+	snmpClient := buildGoSNMP(connInfo)
+
+	if err := snmpClient.Connect(); err != nil {
+		logSnmpOperation(db, connInfo.IP, "WALK", strings.Join(oids, ","), "", "FAILED", err.Error())
+		return nil, fmt.Errorf("SNMP connect failed to %s:%d: %w", connInfo.IP, connInfo.Port, err)
+	}
+	defer snmpClient.Conn.Close()
+
+	// Ensure OIDs start with a dot
+	prefixedOIDs := make([]string, len(oids))
+	for i, oid := range oids {
+		if len(oid) > 0 && oid[0] != '.' {
+			prefixedOIDs[i] = "." + oid
+		} else {
+			prefixedOIDs[i] = oid
+		}
+	}
+
+	var results []gosnmp.SnmpPDU
+	for _, oid := range prefixedOIDs {
+		var walkResults []gosnmp.SnmpPDU
+		var err error
+		if snmpClient.Version == gosnmp.Version1 {
+			walkResults, err = snmpClient.WalkAll(oid)
+		} else {
+			walkResults, err = snmpClient.BulkWalkAll(oid)
+		}
+		if err != nil {
+			logSnmpOperation(db, connInfo.IP, "WALK", strings.Join(oids, ","), "", "FAILED", err.Error())
+			return nil, fmt.Errorf("SNMP WALK failed to %s:%d for OID %s: %w", connInfo.IP, connInfo.Port, oid, err)
+		}
+		results = append(results, walkResults...)
+	}
+
+	var params []SnmpParameter
+	for _, variable := range results {
+		params = append(params, SnmpParameter{
+			OID:   variable.Name,
+			Type:  gosnmpTypeToName(variable.Type),
+			Value: formatSnmpValue(variable),
+		})
+	}
+
+	// Log successful WALK
+	resultJSON, _ := json.Marshal(params)
+	logSnmpOperation(db, connInfo.IP, "WALK", strings.Join(oids, ","), string(resultJSON), "SUCCESS", "")
+
+	logger.Infof("SNMP WALK completed for %s:%d, got %d results", connInfo.IP, connInfo.Port, len(params))
+	return params, nil
+}
+
 // buildGoSNMP creates a gosnmp.GoSNMP instance from connection info (shared by GET/SET/WALK).
 func buildGoSNMP(connInfo SnmpConnectionInfo) *gosnmp.GoSNMP {
 	snmpClient := &gosnmp.GoSNMP{

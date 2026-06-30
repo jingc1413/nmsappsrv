@@ -51,6 +51,15 @@ func (r *Repository) FindByElementId(elementId int64, offset, limit int) ([]NeLo
 	return logs, total, nil
 }
 
+func (r *Repository) FindAllByElementId(elementId int64) ([]NeLog, error) {
+	var logs []NeLog
+	err := r.db.Where("element_id = ?", elementId).Find(&logs).Error
+	if err != nil {
+		return nil, err
+	}
+	return logs, nil
+}
+
 func (r *Repository) FindByFilter(elementId *int64, deviceType *string, status *int, offset, limit int) ([]LogCollectionResultVo, int64, error) {
 	var results []LogCollectionResultVo
 	var total int64

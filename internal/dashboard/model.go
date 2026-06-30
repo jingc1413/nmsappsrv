@@ -27,6 +27,12 @@ type ListBaseStationStatisticsVO struct {
 	Pdcp              map[string][]TimeAndDataVO `json:"pdcp"`
 }
 
+// PdcpData holds PDCP UL/DL rate values for a single time point
+type PdcpData struct {
+	UlRate float64 `json:"ulRate"`
+	DlRate float64 `json:"dlRate"`
+}
+
 // ListPDCPTrafficStatisticVO response for PDCP traffic statistics
 type ListPDCPTrafficStatisticVO struct {
 	Plmn string  `json:"plmn"`

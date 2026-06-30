@@ -69,9 +69,10 @@ func (h *Handler) GetMmlCommandParams(c *gin.Context) {
 // ExecuteMml handles POST /mml-execute
 func (h *Handler) ExecuteMml(c *gin.Context) {
 	var req struct {
-		ElementId int64  `json:"element_id"`
-		Command   string `json:"command"`
-		Uid       string `json:"uid"`
+		ElementId int64                  `json:"element_id"`
+		Command   string                 `json:"command"`
+		Uid       string                 `json:"uid"`
+		Params    map[string]interface{} `json:"params"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.Error(c, http.StatusBadRequest, "invalid request body")
@@ -81,7 +82,7 @@ func (h *Handler) ExecuteMml(c *gin.Context) {
 	uid := middleware.GetUserId(c)
 	username := middleware.GetUsername(c)
 
-	result, err := h.svc.ExecuteMml(req.ElementId, req.Command, req.Uid, username)
+	result, err := h.svc.ExecuteMml(req.ElementId, req.Command, req.Uid, username, req.Params)
 	if err != nil {
 		utils.Error(c, http.StatusInternalServerError, "failed to execute MML command")
 		return

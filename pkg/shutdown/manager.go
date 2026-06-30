@@ -13,10 +13,10 @@ import (
 type Cleaner func(context.Context) error
 
 type Manager struct {
-	mu sync.RWMutex
+	mu       sync.RWMutex
 	cleaners []Cleaner
-	once sync.Once
-	err error
+	once     sync.Once
+	err      error
 }
 
 func New() *Manager {

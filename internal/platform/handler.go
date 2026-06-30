@@ -1,6 +1,13 @@
 package platform
 
 import (
+	"archive/zip"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+
+	"nmsappsrv/internal/config"
 	"nmsappsrv/pkg/utils"
 
 	"github.com/gin-gonic/gin"
@@ -9,12 +16,16 @@ import (
 
 // Handler provides HTTP handlers for platform settings endpoints
 type Handler struct {
-	svc *Service
+	svc           *Service
+	platformFiles config.PlatformFilesConfig
 }
 
 // NewHandler creates a new Handler
-func NewHandler(db *gorm.DB, aesKeyHex string) *Handler {
-	return &Handler{svc: NewService(NewRepository(db), aesKeyHex)}
+func NewHandler(db *gorm.DB, aesKeyHex string, pfCfg config.PlatformFilesConfig) *Handler {
+	return &Handler{
+		svc:           NewService(NewRepository(db), aesKeyHex),
+		platformFiles: pfCfg,
+	}
 }
 
 // GetDate handles POST /api/v1/getDate
@@ -134,21 +145,98 @@ func (h *Handler) UpdateNMSSecret(c *gin.Context) {
 
 // DownloadPasswordRSAPublicKey handles GET /api/v1/downloadPasswordRSAPublicKey
 func (h *Handler) DownloadPasswordRSAPublicKey(c *gin.Context) {
-	// File download from /home/cert/password/publicKey.pem
-	// TODO: implement file streaming when deployment paths are configured
-	c.File("/home/cert/password/publicKey.pem")
+	filePath := h.platformFiles.RSAPublicKeyPath
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		utils.Error(c, 404, fmt.Sprintf("RSA public key file not found: %s", filePath))
+		return
+	}
+	c.File(filePath)
 }
 
 // DownloadPlatformLogs handles POST /api/v1/downloadPlatformLogs
 func (h *Handler) DownloadPlatformLogs(c *gin.Context) {
-	// TODO: implement async log collection and ZIP download
-	// This requires background goroutine + WebSocket notification pattern
-	utils.Success(c, nil)
+	logDir := h.platformFiles.PlatformLogDir
+
+	// Check if the platform log directory exists
+	dirInfo, err := os.Stat(logDir)
+	if err != nil || !dirInfo.IsDir() {
+		utils.Error(c, 404, fmt.Sprintf("platform log directory not found: %s", logDir))
+		return
+	}
+
+	// Create a temp file for the ZIP
+	tmpFile, err := os.CreateTemp("", "platform-logs-*.zip")
+	if err != nil {
+		utils.Error(c, 500, "failed to create temp file for log archive")
+		return
+	}
+	tmpPath := tmpFile.Name()
+	// Ensure cleanup of the temp file after serving
+	defer os.Remove(tmpPath)
+
+	// Create a ZIP writer
+	zipWriter := zip.NewWriter(tmpFile)
+
+	// Walk the log directory and add files to the ZIP
+	err = filepath.Walk(logDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		// Compute relative path for the entry name
+		relPath, err := filepath.Rel(logDir, path)
+		if err != nil {
+			return err
+		}
+		// Create ZIP entry
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = relPath
+		header.Method = zip.Deflate
+
+		writer, err := zipWriter.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		// Open the source file and copy its contents
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		_, err = io.Copy(writer, file)
+		return err
+	})
+
+	if err != nil {
+		zipWriter.Close()
+		tmpFile.Close()
+		utils.Error(c, 500, "failed to create log archive")
+		return
+	}
+
+	// Close the ZIP writer and temp file
+	if err := zipWriter.Close(); err != nil {
+		tmpFile.Close()
+		utils.Error(c, 500, "failed to finalize log archive")
+		return
+	}
+	tmpFile.Close()
+
+	// Serve the ZIP file as an attachment download
+	c.FileAttachment(tmpPath, "platform-logs.zip")
 }
 
 // DownloadNMSManualDocument handles GET /api/v1/downloadNMSManualDocument
 func (h *Handler) DownloadNMSManualDocument(c *gin.Context) {
-	// File download from /home/nms_manual.pdf (or configured path)
-	// TODO: implement when manual file path is configured
-	c.File("/home/nms_manual.pdf")
+	filePath := h.platformFiles.NMSManualDocPath
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		utils.Error(c, 404, fmt.Sprintf("NMS manual document not found: %s", filePath))
+		return
+	}
+	c.FileAttachment(filePath, "nms_manual.pdf")
 }

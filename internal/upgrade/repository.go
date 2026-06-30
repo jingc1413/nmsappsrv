@@ -1,6 +1,8 @@
 package upgrade
 
 import (
+	"encoding/json"
+
 	"nmsappsrv/pkg/logger"
 
 	"gorm.io/gorm"
@@ -156,6 +158,20 @@ func (r *Repository) CreateRollbackTask(t *RollbackTask) error {
 	return r.db.Create(t).Error
 }
 
+// UpdateRollbackTask saves changes to an existing rollback task.
+func (r *Repository) UpdateRollbackTask(t *RollbackTask) error {
+	return r.db.Save(t).Error
+}
+
+// FindRollbackTaskByID returns a single rollback task by its primary key.
+func (r *Repository) FindRollbackTaskByID(id int) (*RollbackTask, error) {
+	var t RollbackTask
+	if err := r.db.Where("id = ?", id).First(&t).Error; err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 // FindRollbackTasks returns a paginated list of rollback tasks for the given
 // tenancy together with the total count.
 func (r *Repository) FindRollbackTasks(tenancyId int, offset, limit int) ([]RollbackTask, int64, error) {
@@ -173,4 +189,50 @@ func (r *Repository) FindRollbackTasks(tenancyId int, offset, limit int) ([]Roll
 		return nil, 0, err
 	}
 	return tasks, total, nil
+}
+
+// ---------------------------------------------------------------------------
+// Additional helpers for upgrade dispatch
+// ---------------------------------------------------------------------------
+
+// FindUpgradeFileByID returns a single upgrade file by its primary key.
+func (r *Repository) FindUpgradeFileByID(id int) (*UpgradeFile, error) {
+	var f UpgradeFile
+	if err := r.db.Where("id = ?", id).First(&f).Error; err != nil {
+		return nil, err
+	}
+	return &f, nil
+}
+
+// UpdateUpgradeLog saves changes to an existing upgrade log entry.
+func (r *Repository) UpdateUpgradeLog(log *UpgradeLog) error {
+	return r.db.Save(log).Error
+}
+
+// FindElementInfo returns serial_number and device_type for a given element.
+func (r *Repository) FindElementInfo(elementId int64) (sn string, deviceType string, err error) {
+	var row struct {
+		SN         string `gorm:"column:serial_number"`
+		DeviceType string `gorm:"column:device_type"`
+	}
+	err = r.db.Table("cpe_element").
+		Select("serial_number, device_type").
+		Where("ne_neid = ? AND deleted = 0", elementId).
+		Scan(&row).Error
+	return row.SN, row.DeviceType, err
+}
+
+// ParseElementIds deserializes the JSON element_ids column.
+func ParseElementIds(jsonStr string) []int64 {
+	var ids []int64
+	if jsonStr != "" {
+		json.Unmarshal([]byte(jsonStr), &ids)
+	}
+	return ids
+}
+
+// MarshalElementIds serializes element IDs to JSON.
+func MarshalElementIds(ids []int64) string {
+	b, _ := json.Marshal(ids)
+	return string(b)
 }

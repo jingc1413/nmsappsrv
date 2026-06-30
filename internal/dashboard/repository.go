@@ -146,3 +146,64 @@ func (r *Repository) QueryOnlineStatistics(ctx context.Context, elementIds []int
 	err := r.db.WithContext(ctx).Raw(sql, args...).Scan(&results).Error
 	return results, err
 }
+
+// QueryDashboardPmData queries dashboard_pm_statistic_data for a time range and optional tenancyId
+func (r *Repository) QueryDashboardPmData(ctx context.Context, tenancyId *int, startTime, endTime time.Time) ([]map[string]interface{}, error) {
+	var results []map[string]interface{}
+
+	q := r.db.WithContext(ctx).Table("dashboard_pm_statistic_data").
+		Select("`time`, cell_available_rate, pdcp_ul_rate, pdcp_dl_rate").
+		Where("`time` >= ? AND `time` <= ?", startTime, endTime)
+
+	if tenancyId != nil {
+		q = q.Where("tenancy_id = ?", *tenancyId)
+	}
+
+	q = q.Order("`time` ASC")
+
+	err := q.Scan(&results).Error
+	return results, err
+}
+
+// QueryDeviceGroupsByIds queries device_group by group IDs
+func (r *Repository) QueryDeviceGroupsByIds(ctx context.Context, groupIds []string) ([]map[string]interface{}, error) {
+	var results []map[string]interface{}
+
+	err := r.db.WithContext(ctx).Table("device_group").
+		Select("id, group_name, license_id").
+		Where("id IN ?", groupIds).
+		Scan(&results).Error
+
+	return results, err
+}
+
+// QueryGroupElementIds queries element IDs belonging to a device group via group_has_element join
+func (r *Repository) QueryGroupElementIds(ctx context.Context, groupId string) ([]int64, error) {
+	var elementIds []int64
+
+	err := r.db.WithContext(ctx).Table("group_has_element").
+		Where("group_id = ?", groupId).
+		Pluck("element_id", &elementIds).Error
+
+	return elementIds, err
+}
+
+// QueryDeviceStatisticForGroup queries device_statistic for elements in a group within a time range.
+// Returns rows with statistic_time, online, element_id.
+func (r *Repository) QueryDeviceStatisticForGroup(ctx context.Context, elementIds []int64, startTime, endTime time.Time) ([]map[string]interface{}, error) {
+	var results []map[string]interface{}
+
+	if len(elementIds) == 0 {
+		return results, nil
+	}
+
+	sql := `SELECT ds.statistic_time, ds.online, ds.element_id
+		FROM device_statistic ds
+		WHERE ds.element_id IN ?
+		AND ds.statistic_time >= ?
+		AND ds.statistic_time <= ?
+		ORDER BY ds.statistic_time ASC`
+
+	err := r.db.WithContext(ctx).Raw(sql, elementIds, startTime, endTime).Scan(&results).Error
+	return results, err
+}

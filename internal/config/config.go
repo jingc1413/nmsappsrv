@@ -9,15 +9,16 @@ import (
 )
 
 type Config struct {
-	Server  ServerConfig  `mapstructure:"server"`
-	DB      DatabaseConfig `mapstructure:"database"`
-	Redis   RedisConfig   `mapstructure:"redis"`
-	Logger  LoggerConfig  `mapstructure:"logger"`
-	TR069   TR069Config   `mapstructure:"tr069"`
-	SNMP    SNMPConfig    `mapstructure:"snmp"`
-	MQ      MQConfig      `mapstructure:"mq"`
-	Mail    MailConfig    `mapstructure:"mail"`
-	STUN    STUNConfig    `mapstructure:"stun"`
+	Server        ServerConfig        `mapstructure:"server"`
+	DB            DatabaseConfig      `mapstructure:"database"`
+	Redis         RedisConfig         `mapstructure:"redis"`
+	Logger        LoggerConfig        `mapstructure:"logger"`
+	TR069         TR069Config         `mapstructure:"tr069"`
+	SNMP          SNMPConfig          `mapstructure:"snmp"`
+	MQ            MQConfig            `mapstructure:"mq"`
+	Mail          MailConfig          `mapstructure:"mail"`
+	STUN          STUNConfig          `mapstructure:"stun"`
+	PlatformFiles PlatformFilesConfig `mapstructure:"platform_files"`
 }
 
 type ServerConfig struct {
@@ -90,6 +91,13 @@ type STUNConfig struct {
 	Port    int  `mapstructure:"port"`
 }
 
+// PlatformFilesConfig holds configurable paths for platform file downloads
+type PlatformFilesConfig struct {
+	RSAPublicKeyPath string `mapstructure:"rsa_public_key_path" yaml:"rsa_public_key_path"`
+	NMSManualDocPath string `mapstructure:"nms_manual_doc_path" yaml:"nms_manual_doc_path"`
+	PlatformLogDir   string `mapstructure:"platform_log_dir" yaml:"platform_log_dir"`
+}
+
 var Cfg *Config
 
 func Load(configPath ...string) (*Config, error) {
@@ -115,6 +123,17 @@ func Load(configPath ...string) (*Config, error) {
 	Cfg = &Config{}
 	if err := v.Unmarshal(Cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	// Apply defaults for platform file paths if not set
+	if Cfg.PlatformFiles.RSAPublicKeyPath == "" {
+		Cfg.PlatformFiles.RSAPublicKeyPath = "./cert/password/publicKey.pem"
+	}
+	if Cfg.PlatformFiles.NMSManualDocPath == "" {
+		Cfg.PlatformFiles.NMSManualDocPath = "./docs/nms_manual.pdf"
+	}
+	if Cfg.PlatformFiles.PlatformLogDir == "" {
+		Cfg.PlatformFiles.PlatformLogDir = "./logs/platform"
 	}
 
 	// 初始化日志
