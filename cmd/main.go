@@ -15,6 +15,7 @@ import (
 	"nmsappsrv/internal/config"
 	"nmsappsrv/internal/corenet"
 	"nmsappsrv/internal/device"
+	"nmsappsrv/internal/diagnostics"
 	"nmsappsrv/internal/eventlog"
 	"nmsappsrv/internal/license"
 	"nmsappsrv/internal/middleware"
@@ -121,6 +122,7 @@ func main() {
 	cbsdH := cbsd.NewHandler(db)
 	corenetH := corenet.NewHandler(db)
 	miscH := misc.NewHandler(db)
+	diagnosticsH := diagnostics.NewHandler(db)
 
 	// TR069 ACS
 	tr069MsgMgr := tr069.NewMessageManager()
@@ -221,6 +223,8 @@ func main() {
 			auth.DELETE("/pm/kpi-alarms/:id", pmH.DeleteKPIAlarm)
 			auth.GET("/pm/dashboard", pmH.GetDashboardData)
 			auth.GET("/pm/pdcp-traffic", pmH.GetPDCPTraffic)
+			auth.GET("/pm/device-online-info", pmH.GetDeviceOnlineInfo)
+			auth.GET("/pm/product-type-device-count", pmH.GetProductTypeAndDeviceCount)
 
 			// 监控任务
 			auth.GET("/monitor-tasks", monitorH.ListMonitorTasks)
@@ -342,6 +346,14 @@ func main() {
 
 			// MR (Measurement Report)
 			auth.GET("/mr-data", miscH.ListMRData)
+
+			// CPE 诊断
+			auth.POST("/diagnostics/result", diagnosticsH.ListDiagnosticsResult)
+			auth.POST("/diagnostics/status", diagnosticsH.ListDiagnosticsStatus)
+			auth.POST("/diagnostics/ping", diagnosticsH.DiagnosticsPing)
+			auth.POST("/diagnostics/trace-route", diagnosticsH.DiagnosticsTraceRoute)
+			auth.POST("/diagnostics/download", diagnosticsH.DiagnosticsDownload)
+			auth.POST("/diagnostics/upload", diagnosticsH.DiagnosticsUpload)
 
 			// 北向接口
 			auth.GET("/north-reports", miscH.ListNorthReports)

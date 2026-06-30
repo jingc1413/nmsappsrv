@@ -147,3 +147,34 @@ type PDCPTraffic struct {
 }
 
 func (PDCPTraffic) TableName() string { return "pdcp_traffic" }
+
+// ---------- Dashboard DTOs ----------
+
+// DeviceOnlineInfoVO 设备在线信息统计 (gNB/eNB/CPE 各自在线/离线数)
+type DeviceOnlineInfoVO struct {
+	GnbTotal    int64 `json:"gnbTotal"`
+	GnbOnline   int64 `json:"gnbOnline"`
+	GnbOffline  int64 `json:"gnbOffline"`
+	EnbTotal    int64 `json:"enbTotal"`
+	EnbOnline   int64 `json:"enbOnline"`
+	EnbOffline  int64 `json:"enbOffline"`
+	CpeTotal    int64 `json:"cpeTotal"`
+	CpeOnline   int64 `json:"cpeOnline"`
+	CpeOffline  int64 `json:"cpeOffline"`
+}
+
+// ProductTypeAndCount 按产品型号统计设备数量及在线情况
+type ProductTypeAndCount struct {
+	ProductType string `json:"productType"`
+	Count       int64  `json:"count"`
+	OnlineCount int64  `json:"onlineCount"`
+	OfflineCount int64 `json:"offlineCount"`
+}
+
+// elementRow 用于从 cpe_element 表查询的中间结构
+type elementRow struct {
+	NeNeid     int64   `gorm:"column:ne_neid"`
+	DeviceType *string `gorm:"column:device_type"`
+	Generation *string `gorm:"column:generation"`
+	ModelName  *string `gorm:"column:model_name"`
+}

@@ -269,3 +269,28 @@ func (h *Handler) GetPDCPTraffic(c *gin.Context) {
 	}
 	utils.Success(c, items)
 }
+
+// ---------- Dashboard: Device Online Info ----------
+
+func (h *Handler) GetDeviceOnlineInfo(c *gin.Context) {
+	tenancyId := middleware.GetLicenseId(c)
+	info, err := h.svc.GetDeviceOnlineInfo(tenancyId)
+	if err != nil {
+		utils.Error(c, 500, err.Error())
+		return
+	}
+	utils.Success(c, info)
+}
+
+// ---------- Dashboard: Product Type & Device Count ----------
+
+func (h *Handler) GetProductTypeAndDeviceCount(c *gin.Context) {
+	tenancyId := middleware.GetLicenseId(c)
+	mode := c.DefaultQuery("mode", "")
+	items, err := h.svc.GetProductTypeAndDeviceCount(tenancyId, mode)
+	if err != nil {
+		utils.Error(c, 500, err.Error())
+		return
+	}
+	utils.Success(c, items)
+}

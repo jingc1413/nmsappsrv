@@ -59,6 +59,7 @@ type TR069Config struct {
 	InformInterval            int    `mapstructure:"inform_interval"`
 	ConnectionTimeout         int    `mapstructure:"connection_timeout"`
 	UDPConnectionRequestPort  int    `mapstructure:"udp_connection_request_port"`
+	FileServerIp              string `mapstructure:"file_server_ip"`
 }
 
 type SNMPConfig struct {

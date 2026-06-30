@@ -125,3 +125,25 @@ func (r *Repository) FindPDCPTraffic(tenancyId int, startTime, endTime time.Time
 	err := r.db.Where("tenancy_id = ? AND statistic_time BETWEEN ? AND ?", tenancyId, startTime, endTime).Find(&items).Error
 	return items, err
 }
+
+// ---------- Dashboard: cpe_element queries ----------
+
+// FindAllActiveElements 查询所有未删除的设备（ne_neid, device_type, generation, model_name）
+func (r *Repository) FindAllActiveElements(licenseId int) ([]elementRow, error) {
+	var rows []elementRow
+	err := r.db.Table("cpe_element").
+		Select("ne_neid, device_type, generation, model_name").
+		Where("deleted = 0 AND license_id = ?", licenseId).
+		Find(&rows).Error
+	return rows, err
+}
+
+// FindAllActiveElementsAllTenants 查询所有未删除的设备（不限租户），用于全局统计
+func (r *Repository) FindAllActiveElementsAllTenants() ([]elementRow, error) {
+	var rows []elementRow
+	err := r.db.Table("cpe_element").
+		Select("ne_neid, device_type, generation, model_name").
+		Where("deleted = 0").
+		Find(&rows).Error
+	return rows, err
+}

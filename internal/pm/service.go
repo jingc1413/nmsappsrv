@@ -1,9 +1,13 @@
 package pm
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
+
+	"nmsappsrv/pkg/redis"
 )
 
 // Service contains PM business logic.
@@ -117,4 +121,106 @@ func (s *Service) GetPDCPTraffic(tenancyId int, startTime, endTime string) ([]PD
 		return nil, err
 	}
 	return s.repo.FindPDCPTraffic(tenancyId, st, et)
+}
+
+// ---------- Dashboard: Device Online Info ----------
+
+// GetDeviceOnlineInfo 统计 gNB/eNB/CPE 各自在线/离线设备数
+func (s *Service) GetDeviceOnlineInfo(tenancyId int) (*DeviceOnlineInfoVO, error) {
+	rows, err := s.repo.FindAllActiveElements(tenancyId)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx := context.Background()
+	vo := &DeviceOnlineInfoVO{}
+
+	for _, row := range rows {
+		online := redis.Exists(ctx, fmt.Sprintf("online_%d", row.NeNeid))
+		dt := strVal(row.DeviceType)
+		gen := strVal(row.Generation)
+
+		switch {
+		case dt == "enb" && gen == "NR":
+			vo.GnbTotal++
+			if online {
+				vo.GnbOnline++
+			} else {
+				vo.GnbOffline++
+			}
+		case dt == "enb":
+			vo.EnbTotal++
+			if online {
+				vo.EnbOnline++
+			} else {
+				vo.EnbOffline++
+			}
+		default:
+			vo.CpeTotal++
+			if online {
+				vo.CpeOnline++
+			} else {
+				vo.CpeOffline++
+			}
+		}
+	}
+	return vo, nil
+}
+
+// GetProductTypeAndDeviceCount 按产品型号统计设备数量及在线情况
+// mode: "all" 查全部租户, 否则按 tenancyId 过滤
+func (s *Service) GetProductTypeAndDeviceCount(tenancyId int, mode string) ([]ProductTypeAndCount, error) {
+	var rows []elementRow
+	var err error
+	if mode == "all" {
+		rows, err = s.repo.FindAllActiveElementsAllTenants()
+	} else {
+		rows, err = s.repo.FindAllActiveElements(tenancyId)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	ctx := context.Background()
+	// group by model_name
+	type agg struct {
+		count        int64
+		onlineCount  int64
+	}
+	grouped := make(map[string]*agg)
+
+	for _, row := range rows {
+		modelName := strVal(row.ModelName)
+		if modelName == "" {
+			modelName = "Unknown"
+		}
+		a, ok := grouped[modelName]
+		if !ok {
+			a = &agg{}
+			grouped[modelName] = a
+		}
+		a.count++
+		if redis.Exists(ctx, fmt.Sprintf("online_%d", row.NeNeid)) {
+			a.onlineCount++
+		}
+	}
+
+	result := make([]ProductTypeAndCount, 0, len(grouped))
+	for pt, a := range grouped {
+		result = append(result, ProductTypeAndCount{
+			ProductType:  pt,
+			Count:        a.count,
+			OnlineCount:  a.onlineCount,
+			OfflineCount: a.count - a.onlineCount,
+		})
+	}
+	return result, nil
+}
+
+// strVal safely dereference a *string, returning "" for nil.
+func strVal(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
