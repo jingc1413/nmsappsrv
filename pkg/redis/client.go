@@ -70,6 +70,11 @@ func Get(ctx context.Context, key string) (string, error) {
 	return RDB.Get(ctx, key).Result()
 }
 
+// MGet gets multiple keys at once
+func MGet(ctx context.Context, keys ...string) ([]interface{}, error) {
+	return RDB.MGet(ctx, keys...).Result()
+}
+
 func Del(ctx context.Context, keys ...string) error {
 	return RDB.Del(ctx, keys...).Err()
 }

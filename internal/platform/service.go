@@ -1,0 +1,338 @@
+package platform
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+)
+
+// Service provides platform settings operations
+type Service struct {
+	repo   *Repository
+	aesKey []byte // 32-byte AES-256 key
+}
+
+// NewService creates a new Service
+func NewService(repo *Repository, aesKeyHex string) *Service {
+	key := make([]byte, 32)
+	if aesKeyHex != "" {
+		decoded, err := hex.DecodeString(aesKeyHex)
+		if err == nil && len(decoded) >= 16 {
+			copy(key, decoded)
+		}
+	}
+	return &Service{repo: repo, aesKey: key}
+}
+
+// GetTime returns current server time in milliseconds
+func (s *Service) GetTime() int64 {
+	return time.Now().UnixMilli()
+}
+
+// GetSupportedZone returns all available timezone IDs
+func (s *Service) GetSupportedZone() []string {
+	// Go doesn't have a direct equivalent of ZoneId.getAvailableZoneIds()
+	// Return a comprehensive list of common timezones
+	return commonTimezones
+}
+
+// GetLogo returns the logo base64 string from license/tenancy
+func (s *Service) GetLogo(licenseLogo string) string {
+	if licenseLogo != "" {
+		return licenseLogo
+	}
+	// Return empty string if no logo configured (frontend should use default)
+	return ""
+}
+
+// ---------- Log Config ----------
+
+// GetLogConfig returns the current log level configuration
+func (s *Service) GetLogConfig() (*LogConfig, error) {
+	value, err := s.repo.GetSystemConfig("platform_log_config")
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := &LogConfig{Level: "info"} // default
+	if value != "" {
+		if err := json.Unmarshal([]byte(value), cfg); err != nil {
+			return cfg, nil
+		}
+	}
+	if cfg.Level == "" {
+		cfg.Level = "info"
+	}
+	return cfg, nil
+}
+
+// UpdateLogConfig updates the log level configuration
+func (s *Service) UpdateLogConfig(cfg *LogConfig) error {
+	if !isValidLogLevel(cfg.Level) {
+		return fmt.Errorf("invalid log level: %s", cfg.Level)
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return s.repo.SaveSystemConfig("platform_log_config", string(data))
+}
+
+// ---------- FTP Transfer Log Config ----------
+
+// GetFTPTransferLogConfig returns the FTP transfer log config with decrypted password
+func (s *Service) GetFTPTransferLogConfig() (*FTPTransferLogConfig, error) {
+	value, err := s.repo.GetSystemConfig("log_ftp_transfer_config")
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := &FTPTransferLogConfig{PasswordChange: boolPtr(false)}
+	if value == "" {
+		return cfg, nil
+	}
+
+	if err := json.Unmarshal([]byte(value), cfg); err != nil {
+		return &FTPTransferLogConfig{PasswordChange: boolPtr(false)}, nil
+	}
+
+	// Decrypt password
+	if cfg.Password != "" {
+		decrypted := s.decrypt(cfg.Password)
+		cfg.Password = maskPassword(decrypted)
+	}
+	cfg.PasswordChange = boolPtr(false)
+	return cfg, nil
+}
+
+// UpdateFTPTransferLogConfig updates the FTP transfer log config with encrypted password
+func (s *Service) UpdateFTPTransferLogConfig(cfg *FTPTransferLogConfig) error {
+	if cfg.Host == "" || cfg.Username == "" || cfg.Password == "" || cfg.UploadPath == "" || cfg.Port == nil {
+		return fmt.Errorf("host, username, password, uploadPath and port are required")
+	}
+
+	// Check if existing config exists
+	existing, _ := s.repo.GetSystemConfig("log_ftp_transfer_config")
+	if existing != "" {
+		var existingCfg FTPTransferLogConfig
+		if err := json.Unmarshal([]byte(existing), &existingCfg); err == nil {
+			existingCfg.Host = cfg.Host
+			existingCfg.Port = cfg.Port
+			existingCfg.Username = cfg.Username
+			existingCfg.UploadPath = cfg.UploadPath
+			// Only update password if passwordChange is true
+			if cfg.PasswordChange != nil && *cfg.PasswordChange {
+				existingCfg.Password = s.encrypt(cfg.Password)
+			}
+			data, err := json.Marshal(existingCfg)
+			if err != nil {
+				return err
+			}
+			return s.repo.SaveSystemConfig("log_ftp_transfer_config", string(data))
+		}
+	}
+
+	// New config — encrypt password
+	cfg.Password = s.encrypt(cfg.Password)
+	cfg.PasswordChange = nil
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return s.repo.SaveSystemConfig("log_ftp_transfer_config", string(data))
+}
+
+// ---------- HEC Config ----------
+
+// GetHECConfig returns the HEC configuration
+func (s *Service) GetHECConfig() (*HECConfig, error) {
+	value, err := s.repo.GetSystemConfig("hec_config")
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := &HECConfig{}
+	if value == "" {
+		return cfg, nil
+	}
+
+	if err := json.Unmarshal([]byte(value), cfg); err != nil {
+		return &HECConfig{}, nil
+	}
+	return cfg, nil
+}
+
+// UpdateHECConfig updates the HEC configuration
+func (s *Service) UpdateHECConfig(cfg *HECConfig) error {
+	if cfg.URL == "" || cfg.Token == "" {
+		return fmt.Errorf("url and token are required")
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return s.repo.SaveSystemConfig("hec_config", string(data))
+}
+
+// ---------- NMS Secret ----------
+
+// ListNMSSecret returns NMS secret settings
+func (s *Service) ListNMSSecret() (*NMSSecret, error) {
+	value, err := s.repo.GetSystemConfig("nms_secret")
+	if err != nil {
+		return nil, err
+	}
+
+	secret := &NMSSecret{
+		EmailSecret:    defaultEmailSecret,
+		AddressSecret:  defaultAddressSecret,
+		PasswordSecret: defaultPasswordSecret,
+	}
+
+	if value == "" {
+		return secret, nil
+	}
+
+	if err := json.Unmarshal([]byte(value), secret); err != nil {
+		return secret, nil
+	}
+
+	if secret.EmailSecret == "" {
+		secret.EmailSecret = defaultEmailSecret
+	}
+	if secret.AddressSecret == "" {
+		secret.AddressSecret = defaultAddressSecret
+	}
+	if secret.PasswordSecret == "" {
+		secret.PasswordSecret = defaultPasswordSecret
+	}
+	return secret, nil
+}
+
+// UpdateNMSSecret updates NMS secret settings
+func (s *Service) UpdateNMSSecret(secret *NMSSecret) error {
+	if secret.EmailSecret == "" {
+		return fmt.Errorf("emailSecret is required")
+	}
+	if !isValidSecret(secret.EmailSecret) {
+		return fmt.Errorf("emailSecret can only contain numbers and letters and must be 32 characters long")
+	}
+	data, err := json.Marshal(secret)
+	if err != nil {
+		return err
+	}
+	return s.repo.SaveSystemConfig("nms_secret", string(data))
+}
+
+// ---------- AES-GCM encryption ----------
+
+func (s *Service) encrypt(plaintext string) string {
+	if plaintext == "" {
+		return ""
+	}
+	block, err := aes.NewCipher(s.aesKey)
+	if err != nil {
+		return plaintext
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return plaintext
+	}
+	nonce := make([]byte, aead.NonceSize())
+	io.ReadFull(rand.Reader, nonce)
+	ciphertext := aead.Seal(nonce, nonce, []byte(plaintext), nil)
+	return hex.EncodeToString(ciphertext)
+}
+
+func (s *Service) decrypt(ciphertext string) string {
+	if ciphertext == "" {
+		return ""
+	}
+	data, err := hex.DecodeString(ciphertext)
+	if err != nil {
+		return ciphertext
+	}
+	block, err := aes.NewCipher(s.aesKey)
+	if err != nil {
+		return ciphertext
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return ciphertext
+	}
+	nonceSize := aead.NonceSize()
+	if len(data) < nonceSize {
+		return ciphertext
+	}
+	nonce, ct := data[:nonceSize], data[nonceSize:]
+	plaintext, err := aead.Open(nil, nonce, ct, nil)
+	if err != nil {
+		return ciphertext
+	}
+	return string(plaintext)
+}
+
+// ---------- helpers ----------
+
+func isValidLogLevel(level string) bool {
+	valid := []string{"all", "trace", "debug", "info", "warn", "error", "fatal", "off"}
+	for _, v := range valid {
+		if v == level {
+			return true
+		}
+	}
+	return false
+}
+
+func isValidSecret(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+func maskPassword(password string) string {
+	if len(password) <= 4 {
+		return "****"
+	}
+	return password[:2] + strings.Repeat("*", len(password)-4) + password[len(password)-2:]
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
+
+// commonTimezones is a representative subset of IANA timezone names
+var commonTimezones = []string{
+	"Africa/Abidjan", "Africa/Cairo", "Africa/Johannesburg", "Africa/Lagos", "Africa/Nairobi",
+	"America/Anchorage", "America/Argentina/Buenos_Aires", "America/Bogota", "America/Chicago",
+	"America/Denver", "America/Halifax", "America/Lima", "America/Los_Angeles", "America/Mexico_City",
+	"America/New_York", "America/Phoenix", "America/Santiago", "America/Sao_Paulo", "America/Toronto",
+	"America/Vancouver", "America/Winnipeg",
+	"Asia/Almaty", "Asia/Baghdad", "Asia/Bangkok", "Asia/Colombo", "Asia/Dhaka", "Asia/Dubai",
+	"Asia/Ho_Chi_Minh", "Asia/Hong_Kong", "Asia/Jakarta", "Asia/Karachi", "Asia/Kolkata",
+	"Asia/Kuala_Lumpur", "Asia/Kuwait", "Asia/Manila", "Asia/Muscat", "Asia/Riyadh",
+	"Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Taipei", "Asia/Tehran",
+	"Asia/Tokyo", "Asia/Yangon",
+	"Atlantic/Azores", "Atlantic/Reykjavik",
+	"Australia/Adelaide", "Australia/Brisbane", "Australia/Darwin", "Australia/Hobart",
+	"Australia/Melbourne", "Australia/Perth", "Australia/Sydney",
+	"Europe/Amsterdam", "Europe/Athens", "Europe/Belgrade", "Europe/Berlin", "Europe/Brussels",
+	"Europe/Bucharest", "Europe/Budapest", "Europe/Copenhagen", "Europe/Dublin", "Europe/Helsinki",
+	"Europe/Istanbul", "Europe/Kiev", "Europe/Lisbon", "Europe/London", "Europe/Madrid",
+	"Europe/Moscow", "Europe/Oslo", "Europe/Paris", "Europe/Prague", "Europe/Rome",
+	"Europe/Stockholm", "Europe/Vienna", "Europe/Warsaw", "Europe/Zurich",
+	"Pacific/Auckland", "Pacific/Fiji", "Pacific/Guam", "Pacific/Honolulu", "Pacific/Midway",
+	"UTC",
+}

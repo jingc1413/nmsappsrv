@@ -11,14 +11,17 @@ import (
 	"time"
 
 	"nmsappsrv/internal/alarm"
-	"nmsappsrv/internal/cbsd"
 	"nmsappsrv/internal/blacklist"
+	"nmsappsrv/internal/cacert"
+	"nmsappsrv/internal/cbsd"
 	"nmsappsrv/internal/config"
 	"nmsappsrv/internal/corenet"
+	"nmsappsrv/internal/dashboard"
 	"nmsappsrv/internal/device"
 	"nmsappsrv/internal/devicelog"
 	"nmsappsrv/internal/diagnostics"
 	"nmsappsrv/internal/eventlog"
+	"nmsappsrv/internal/health"
 	"nmsappsrv/internal/license"
 	"nmsappsrv/internal/mail"
 	"nmsappsrv/internal/middleware"
@@ -29,17 +32,20 @@ import (
 	"nmsappsrv/internal/ntp"
 	"nmsappsrv/internal/parameter"
 	"nmsappsrv/internal/parammonitor"
+	"nmsappsrv/internal/platform"
 	"nmsappsrv/internal/pm"
 	"nmsappsrv/internal/reboot"
 	"nmsappsrv/internal/reset"
+	"nmsappsrv/internal/resources"
 	"nmsappsrv/internal/restapi"
 	"nmsappsrv/internal/security"
 	"nmsappsrv/internal/site"
 	"nmsappsrv/internal/snmp"
 	sshmod "nmsappsrv/internal/ssh"
 	"nmsappsrv/internal/systemsettings"
-	"nmsappsrv/internal/upgrade"
+	"nmsappsrv/internal/tenancy"
 	"nmsappsrv/internal/tr069"
+	"nmsappsrv/internal/upgrade"
 	"nmsappsrv/internal/user"
 	"nmsappsrv/pkg/database"
 	"nmsappsrv/pkg/logger"
@@ -152,6 +158,14 @@ func main() {
 	restapiRepo := restapi.NewRepository(db)
 	restapiSvc := restapi.NewService(restapiRepo)
 	restapiH := restapi.NewHandler(restapiSvc)
+
+	// Second batch modules
+	healthH := health.NewHandler(db)
+	resourcesH := resources.NewHandler(db)
+	platformH := platform.NewHandler(db, cfg.Mail.AESKey)
+	tenancyH := tenancy.NewHandler(db)
+	cacertH := cacert.NewHandler(db)
+	dashboardH := dashboard.NewHandler(db)
 
 	// 启动SSH Access Timer后台过期检查
 	sshH.StartExpiredChecker()
@@ -510,6 +524,65 @@ func main() {
 			auth.PUT("/nms-backup/config", nmsbackupH.UpdateBackupAndRestoreConfig)
 			auth.POST("/nms-backup/logs", nmsbackupH.ListNMSBackupLogs)
 			auth.POST("/nms-backup/logs/detail", nmsbackupH.GetNMSBackupLogDetail)
+
+			// ========== Health Module ==========
+			router.GET("/healthCheck", healthH.HealthCheck)
+			auth.GET("/getMysqlInfo", healthH.GetMysqlInfo)
+			auth.GET("/getRedisInfo", healthH.GetRedisInfo)
+			auth.GET("/getQueueInfo", healthH.GetQueueInfo)
+			auth.POST("/reportHAStatus", healthH.ReportHAStatus)
+			router.HEAD("/reportHAStatus", healthH.ReportHAStatusHead)
+
+			// ========== Resources Module ==========
+			auth.POST("/cpu-mem-usage", resourcesH.GetCpuAndMemUsage)
+			auth.GET("/table-status", resourcesH.GetTableStatus)
+			auth.GET("/disk-usage", resourcesH.GetDiskUsage)
+			auth.POST("/cpu-mem-threshold", resourcesH.SetCPUAndMemThreshold)
+			auth.POST("/list-cpu-mem-threshold", resourcesH.ListCPUAndMemThreshold)
+
+			// ========== Platform Settings Module ==========
+			auth.GET("/getDate", platformH.GetDate)
+			auth.GET("/getSupportedZone", platformH.GetSupportedZone)
+			auth.GET("/getLogo", platformH.GetLogo)
+			auth.POST("/listLogConfig", platformH.ListLogConfig)
+			auth.POST("/updateLogConfig", platformH.UpdateLogConfig)
+			auth.POST("/getFTPTransferLogConfig", platformH.GetFTPTransferLogConfig)
+			auth.POST("/updateFTPTransferLogConfig", platformH.UpdateFTPTransferLogConfig)
+			auth.POST("/getHECConfig", platformH.GetHECConfig)
+			auth.POST("/updateHECConfig", platformH.UpdateHECConfig)
+			auth.POST("/listNMSSecret", platformH.ListNMSSecret)
+			auth.POST("/updateNMSSecret", platformH.UpdateNMSSecret)
+			auth.GET("/downloadPasswordRSAPublicKey", platformH.DownloadPasswordRSAPublicKey)
+			auth.GET("/downloadPlatformLogs", platformH.DownloadPlatformLogs)
+			auth.GET("/downloadNMSManualDocument", platformH.DownloadNMSManualDocument)
+
+			// ========== Tenancy Management Module ==========
+			auth.POST("/addTenancy", tenancyH.AddTenancy)
+			auth.POST("/updateTenancy", tenancyH.UpdateTenancy)
+			auth.POST("/listTenancy", tenancyH.ListTenancy)
+			auth.POST("/deleteTenancy", tenancyH.DeleteTenancy)
+			auth.POST("/viewTenancy", tenancyH.ViewTenancy)
+
+			// ========== CA/Certificate Module ==========
+			auth.POST("/caFile/list", cacertH.ListCaFiles)
+			auth.POST("/caFile/delete", cacertH.DeleteCaFile)
+			auth.POST("/caFile/queryCaList", cacertH.QueryCaList)
+			auth.POST("/caFile/upload", cacertH.UploadCaFile)
+			router.GET("/acs-file-server/ca/downloadFile/:fileId", cacertH.DownloadCaFile)
+			auth.POST("/catask/save", cacertH.SaveCaTask)
+			auth.POST("/catask/list", cacertH.ListCaTasks)
+			auth.POST("/catask/detail", cacertH.GetCaTaskDetail)
+			auth.POST("/catask/delete", cacertH.DeleteCaTask)
+			auth.POST("/catask/queryDeviceSendCaLog", cacertH.QueryDeviceSendCaLog)
+
+			// ========== Dashboard Management Module ==========
+			auth.POST("/listCpeOnlineStatistics", dashboardH.ListCpeOnlineStatistics)
+			auth.POST("/listGNBOnlineStatistics", dashboardH.ListGNBOnlineStatistics)
+			auth.POST("/listProductTypeAndDeviceCount", dashboardH.ListProductTypeAndDeviceCount)
+			auth.POST("/listBaseStationStatistics", dashboardH.ListBaseStationStatistics)
+			auth.POST("/listPDCPTrafficStatistic", dashboardH.ListPDCPTrafficStatistic)
+			auth.POST("/listDeviceOnlineInfo", dashboardH.ListDeviceOnlineInfo)
+			auth.POST("/statisticKPIForDevicelop", dashboardH.StatisticKPIForDevicelop)
 		}
 	}
 

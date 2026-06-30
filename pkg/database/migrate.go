@@ -2,6 +2,7 @@ package database
 
 import (
 	"nmsappsrv/internal/alarm"
+	"nmsappsrv/internal/cacert"
 	"nmsappsrv/internal/cbsd"
 	"nmsappsrv/internal/corenet"
 	"nmsappsrv/internal/device"
@@ -179,6 +180,11 @@ func AutoMigrateAll() error {
 
 		// restapi (1)
 		&restapi.TBGDevice{},
+
+		// cacert (3)
+		&cacert.CaFile{},
+		&cacert.CaTask{},
+		&cacert.DeviceSendCaLog{},
 
 		// systemsettings (1)
 		&systemsettings.SysParameter{},
