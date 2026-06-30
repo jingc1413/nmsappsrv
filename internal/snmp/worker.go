@@ -94,6 +94,23 @@ func (w *Worker) pollLoop() {
 			if err := SendTrap(msg.ConnectionInfo, msg.Payload); err != nil {
 				logger.Errorf("SNMP worker failed to send trap: %v", err)
 			}
+		case OperationGet:
+			oids := make([]string, 0, len(msg.Payload))
+			for _, p := range msg.Payload {
+				oids = append(oids, p.OID)
+			}
+			results, err := SendGet(msg.ConnectionInfo, oids)
+			if err != nil {
+				logger.Errorf("SNMP worker failed to send GET: %v", err)
+			} else {
+				logger.Infof("SNMP worker GET completed, %d results", len(results))
+			}
+		case OperationSet:
+			if err := SendSet(msg.ConnectionInfo, msg.Payload); err != nil {
+				logger.Errorf("SNMP worker failed to send SET: %v", err)
+			} else {
+				logger.Info("SNMP worker SET completed")
+			}
 		default:
 			logger.Warnf("SNMP worker: unsupported operation type: %d", msg.OperationType)
 		}

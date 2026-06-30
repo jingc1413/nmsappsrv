@@ -104,6 +104,11 @@ func (ep *EventProcessor) ProcessInform(inform *soap.Inform, sn string, deviceTy
 		ep.processEventCode(ctx, evt, sn)
 	}
 
+	// Trigger device initialization if not yet initialized (first Inform after boot)
+	if !cpe.IsInitialized {
+		go ep.triggerDeviceInit(sn, cpe.NeNeid, deviceType)
+	}
+
 	// Create event log entry in DB
 	eventLog := eventlog.EventLog{
 		EventType:     stringPtr("INFORM"),
@@ -236,20 +241,160 @@ func (ep *EventProcessor) ProcessResult(soapXml string, sn string, deviceType st
 func (ep *EventProcessor) processGetParameterValuesResponse(ctx context.Context, soapXml string, sn string, eventLog *eventlog.EventLog) {
 	logger.Infof("processing GetParameterValuesResponse for SN=%s", sn)
 
-	// TODO: Parse actual parameter values from response and save to element_basic_info_parameter
-	// For now, we just log that we received it
+	// Parse parameter values from SOAP response
+	params, err := soap.ParseGetParameterValuesResponse(soapXml)
+	if err != nil {
+		logger.Errorf("failed to parse GPV response for SN=%s: %v", sn, err)
+		eventLog.EventType = stringPtr("GET_PARAMETER_VALUES_RESPONSE")
+		eventLog.Status = intPtr(-1)
+		eventLog.FaultInfo = stringPtr(err.Error())
+		return
+	}
+
+	if len(params) == 0 {
+		logger.Warnf("GPV response for SN=%s contains no parameters", sn)
+		eventLog.EventType = stringPtr("GET_PARAMETER_VALUES_RESPONSE")
+		eventLog.Status = intPtr(0)
+		return
+	}
+
+	// Look up device to get neId for lock key
+	var cpe device.CpeElement
+	if err := ep.db.Where("serial_number = ? AND deleted = ?", sn, false).First(&cpe).Error; err != nil {
+		logger.Errorf("failed to find device %s for saving GPV params: %v", sn, err)
+		eventLog.EventType = stringPtr("GET_PARAMETER_VALUES_RESPONSE")
+		eventLog.Status = intPtr(-1)
+		eventLog.FaultInfo = stringPtr(fmt.Sprintf("device not found: %s", sn))
+		return
+	}
+
+	// Acquire Redis distributed lock to prevent concurrent param writes
+	lockKey := fmt.Sprintf("red_lock_add_parameter_names_%d", cpe.NeNeid)
+	if !redis.Lock(ctx, lockKey, 30*time.Second) {
+		logger.Warnf("failed to acquire param save lock for device %d, will retry", cpe.NeNeid)
+		eventLog.EventType = stringPtr("GET_PARAMETER_VALUES_RESPONSE")
+		eventLog.Status = intPtr(-1)
+		eventLog.FaultInfo = stringPtr("failed to acquire param save lock, retry later")
+		return
+	}
+	defer redis.Unlock(ctx, lockKey)
+
+	// Save parameter values to element_basic_info_parameter
+	ep.saveParameterValues(ctx, sn, params)
+
+	logger.Infof("saved %d parameter values for SN=%s (neId=%d)", len(params), sn, cpe.NeNeid)
 
 	// Update event log status
 	eventLog.EventType = stringPtr("GET_PARAMETER_VALUES_RESPONSE")
 	eventLog.Status = intPtr(0) // success
 }
 
-// processSetParameterValuesResponse updates parameter log status.
+// processSetParameterValuesResponse updates parameter log status and parameter_attributes on success.
 func (ep *EventProcessor) processSetParameterValuesResponse(ctx context.Context, soapXml string, sn string, eventLog *eventlog.EventLog) {
 	logger.Infof("processing SetParameterValuesResponse for SN=%s", sn)
 
+	status, err := soap.ParseSetParameterValuesResponse(soapXml)
+	if err != nil {
+		logger.Errorf("failed to parse SPV response for SN=%s: %v", sn, err)
+		eventLog.EventType = stringPtr("SET_PARAMETER_VALUES_RESPONSE")
+		eventLog.Status = intPtr(-1)
+		eventLog.FaultInfo = stringPtr(err.Error())
+		return
+	}
+
 	eventLog.EventType = stringPtr("SET_PARAMETER_VALUES_RESPONSE")
+
+	if status != 0 {
+		// SPV failed
+		logger.Warnf("SPV response for SN=%s returned status=%d", sn, status)
+		eventLog.Status = intPtr(status)
+		eventLog.FaultInfo = stringPtr(fmt.Sprintf("SPV failed with status %d", status))
+		return
+	}
+
 	eventLog.Status = intPtr(0) // success
+
+	// Extract the parameter names that were set from the tracking data.
+	// The command_track_data contains the operationParam JSON with paramName/paramValue.
+	if eventLog.CommandTrackData != nil {
+		var trackData map[string]interface{}
+		if err := json.Unmarshal([]byte(*eventLog.CommandTrackData), &trackData); err == nil {
+			if opParam, ok := trackData["operationParam"].(string); ok {
+				var setParams []struct {
+					ParamName  string `json:"paramName"`
+					ParamValue string `json:"paramValue"`
+				}
+				if err := json.Unmarshal([]byte(opParam), &setParams); err == nil {
+					ep.updateParameterAttributesAfterSet(ctx, sn, setParams)
+				}
+			}
+		}
+	}
+
+	logger.Infof("SPV success for SN=%s, parameter attributes updated", sn)
+}
+
+// updateParameterAttributesAfterSet updates parameter_attributes and creates parameter_log entries
+// after a successful SetParameterValues response.
+func (ep *EventProcessor) updateParameterAttributesAfterSet(ctx context.Context, sn string, params []struct {
+	ParamName  string `json:"paramName"`
+	ParamValue string `json:"paramValue"`
+}) {
+	var cpe device.CpeElement
+	if err := ep.db.Where("serial_number = ? AND deleted = ?", sn, false).First(&cpe).Error; err != nil {
+		logger.Errorf("failed to find device %s for SPV post-processing: %v", sn, err)
+		return
+	}
+
+	now := time.Now()
+	for _, p := range params {
+		// Update element_basic_info_parameter
+		var existing device.ElementBasicInfoParameter
+		err := ep.db.Where("element_id = ? AND param_name = ?", cpe.NeNeid, p.ParamName).First(&existing).Error
+		if err == nil {
+			oldValue := ""
+			if existing.ParamValue != nil {
+				oldValue = *existing.ParamValue
+			}
+			existing.ParamValue = stringPtr(p.ParamValue)
+			existing.UpdateTime = &now
+			ep.db.Save(&existing)
+
+			// Create parameter_log
+			ep.createParameterLog(ctx, &cpe, p.ParamName, oldValue, p.ParamValue, &now)
+		} else if err == gorm.ErrRecordNotFound {
+			newParam := device.ElementBasicInfoParameter{
+				ElementId:  &cpe.NeNeid,
+				ParamName:  stringPtr(p.ParamName),
+				ParamValue: stringPtr(p.ParamValue),
+				UpdateTime: &now,
+			}
+			ep.db.Create(&newParam)
+			ep.createParameterLog(ctx, &cpe, p.ParamName, "", p.ParamValue, &now)
+		}
+	}
+}
+
+// createParameterLog creates a parameter_log entry recording the old and new values.
+func (ep *EventProcessor) createParameterLog(ctx context.Context, cpe *device.CpeElement, paramName, oldValue, newValue string, changeTime *time.Time) {
+	log := struct {
+		ParameterName string     `gorm:"column:parameter_name;type:varchar(255)"`
+		OldValue      string     `gorm:"column:old_value;type:mediumtext"`
+		NewValue      string     `gorm:"column:new_value;type:mediumtext"`
+		ChangeUser    string     `gorm:"column:change_user;type:varchar(255)"`
+		ChangeTime    *time.Time `gorm:"column:change_time"`
+		ElementId     int64      `gorm:"column:element_id"`
+	}{
+		ParameterName: paramName,
+		OldValue:      oldValue,
+		NewValue:      newValue,
+		ChangeUser:    "tr069",
+		ChangeTime:    changeTime,
+		ElementId:     cpe.NeNeid,
+	}
+	if err := ep.db.Table("parameter_log").Create(&log).Error; err != nil {
+		logger.Errorf("failed to create parameter_log for %s param %s: %v", *cpe.SerialNumber, paramName, err)
+	}
 }
 
 // processTransferComplete updates download/upgrade status.
@@ -347,7 +492,7 @@ func (ep *EventProcessor) updateDeviceBasicInfo(ctx context.Context, cpe *device
 	cpe.LoadedBasicInfo = true
 }
 
-// saveParameterValues saves parameter values to element_basic_info_parameter table.
+// saveParameterValues saves parameter values to element_basic_info_parameter table using batch upsert.
 func (ep *EventProcessor) saveParameterValues(ctx context.Context, sn string, params []soap.ParameterValueStruct) {
 	// First, find the device to get element_id
 	var cpe device.CpeElement
@@ -358,33 +503,99 @@ func (ep *EventProcessor) saveParameterValues(ctx context.Context, sn string, pa
 
 	now := time.Now()
 
+	// Build batch upsert data
 	for _, param := range params {
-		// Check if parameter already exists
-		var existing device.ElementBasicInfoParameter
-		err := ep.db.Where("element_id = ? AND param_name = ?", cpe.NeNeid, param.Name).First(&existing).Error
-
-		if err == nil {
-			// Update existing
-			existing.ParamValue = stringPtr(param.Value)
-			existing.UpdateTime = &now
-			if err := ep.db.Save(&existing).Error; err != nil {
-				logger.Errorf("failed to update parameter %s for %s: %v", param.Name, sn, err)
-			}
-		} else if err == gorm.ErrRecordNotFound {
-			// Create new
-			newParam := device.ElementBasicInfoParameter{
-				ElementId:  &cpe.NeNeid,
-				ParamName:  stringPtr(param.Name),
-				ParamValue: stringPtr(param.Value),
-				UpdateTime: &now,
-			}
-			if err := ep.db.Create(&newParam).Error; err != nil {
-				logger.Errorf("failed to create parameter %s for %s: %v", param.Name, sn, err)
-			}
-		} else {
-			logger.Errorf("failed to query parameter %s for %s: %v", param.Name, sn, err)
+		if param.Name == "" {
+			continue
+		}
+		// Use GORM's upsert pattern: ON DUPLICATE KEY UPDATE
+		rawSQL := `INSERT INTO element_basic_info_parameter (element_id, param_name, param_value, update_time)
+			VALUES (?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE param_value = VALUES(param_value), update_time = VALUES(update_time)`
+		if err := ep.db.Exec(rawSQL, cpe.NeNeid, param.Name, param.Value, now).Error; err != nil {
+			logger.Errorf("failed to upsert parameter %s for %s: %v", param.Name, sn, err)
 		}
 	}
+
+	// Mark device as having loaded basic info
+	if !cpe.LoadedBasicInfo {
+		ep.db.Model(&cpe).Update("loaded_basic_info", true)
+	}
+}
+
+// triggerDeviceInit sends GetParameterValues for device-type-specific basic parameters
+// when a device first connects (IsInitialized=false). After parameters are loaded,
+// the device will be marked as initialized.
+func (ep *EventProcessor) triggerDeviceInit(sn string, neId int64, deviceType string) {
+	ctx := context.Background()
+
+	// Acquire init lock to prevent concurrent init for the same device
+	initLockKey := fmt.Sprintf("device:init_lock:%d", neId)
+	if !redis.Lock(ctx, initLockKey, 60*time.Second) {
+		logger.Infof("device %d already being initialized, skipping", neId)
+		return
+	}
+	defer redis.Unlock(ctx, initLockKey)
+
+	logger.Infof("starting device initialization for SN=%s (neId=%d, type=%s)", sn, neId, deviceType)
+
+	// Get the parameter paths to query based on device type
+	paramPaths := GetBasicParamPaths(deviceType)
+	if len(paramPaths) == 0 {
+		logger.Warnf("no basic param paths for device type %s, marking as initialized", deviceType)
+		ep.db.Model(&device.CpeElement{}).Where("ne_neid = ?", neId).Update("is_initialized", true)
+		return
+	}
+
+	// Build GPV SOAP XML
+	headerId := soap.GenerateHeaderID()
+	soapXml := soap.BuildGetParameterValues(headerId, paramPaths)
+
+	// Save tracking data to event_log
+	now := time.Now()
+	eventType := "GET_PARAMETER_VALUES"
+	trackData, _ := json.Marshal(map[string]interface{}{
+		"header_id":      headerId,
+		"serial_number":  sn,
+		"operation_type": eventType,
+		"is_init":        true,
+		"issue_time":     now.Format(time.RFC3339),
+	})
+	eventLog := eventlog.EventLog{
+		EventType:        &eventType,
+		OperationTime:    &now,
+		CommandIssueTime: &now,
+		ElementId:        &neId,
+		Status:           intPtr(1), // pending
+		CommandTrackData: stringPtr(string(trackData)),
+	}
+	if err := ep.db.Create(&eventLog).Error; err != nil {
+		logger.Errorf("failed to create init event_log for device %d: %v", neId, err)
+	}
+
+	// Cache track data in Redis for quick lookup during response processing
+	trackKey := fmt.Sprintf("tr069:track:%s", headerId)
+	trackJson, _ := json.Marshal(map[string]interface{}{
+		"header_id":      headerId,
+		"sn":             sn,
+		"operation_type": eventType,
+		"event_log_id":   eventLog.Id,
+		"is_init":        true,
+	})
+	redis.Set(ctx, trackKey, string(trackJson), 24*time.Hour)
+
+	// Push SOAP to device queue via MessageManager
+	msgMgr := NewMessageManager()
+	if err := msgMgr.PutMessage(sn, soapXml); err != nil {
+		logger.Errorf("failed to push init GPV to device %s queue: %v", sn, err)
+		return
+	}
+
+	logger.Infof("device init GPV sent for SN=%s, requesting %d parameters", sn, len(paramPaths))
+
+	// Mark device as initialized (the GPV response will be processed asynchronously)
+	// We mark it here to prevent repeated init triggers on subsequent Informs
+	ep.db.Model(&device.CpeElement{}).Where("ne_neid = ?", neId).Update("is_initialized", true)
 }
 
 // sendWebCallback sends a web callback via Redis pub/sub.

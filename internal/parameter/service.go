@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"nmsappsrv/internal/misc"
+	"nmsappsrv/internal/tr069/soap"
 	"nmsappsrv/pkg/logger"
 	"nmsappsrv/pkg/redis"
 
@@ -32,31 +33,103 @@ func (s *Service) GetParameters(elementId int64) ([]ParameterAttributes, error) 
 	return s.repo.FindParametersByElementId(elementId)
 }
 
-// SetParameter updates a parameter value for the given element and creates a
-// change-log entry recording the old and new values.
+// SetParameter updates a parameter value for the given element and dispatches
+// the change to the device via TR-069 SetParameterValues.
 func (s *Service) SetParameter(elementId int64, paramName string, value string, username string) error {
-	pa, err := s.repo.FindParameterAttributes(elementId, paramName)
-	if err != nil {
-		return err
+	ctx := context.Background()
+
+	// 1. Look up device serial number
+	var deviceInfo struct {
+		SerialNumber string `gorm:"column:serial_number"`
+		DeviceName   string `gorm:"column:device_name"`
+	}
+	if err := s.repo.db.Table("cpe_element").
+		Select("serial_number, device_name").
+		Where("ne_neid = ? AND deleted = ?", elementId, false).
+		Scan(&deviceInfo).Error; err != nil {
+		return fmt.Errorf("device not found: %w", err)
+	}
+	if deviceInfo.SerialNumber == "" {
+		return fmt.Errorf("device %d has no serial number", elementId)
 	}
 
-	// Persist the new value on the parameter_attributes row.
-	if err := s.repo.db.Model(&ParameterAttributes{}).
-		Where("id = ?", pa.Id).
-		Update("value", value).Error; err != nil {
-		logger.Errorf("SetParameter update error: %v", err)
-		return err
-	}
+	// 2. Get old value from element_basic_info_parameter (for audit log)
+	var oldValue string
+	s.repo.db.Table("element_basic_info_parameter").
+		Select("param_value").
+		Where("element_id = ? AND param_name = ?", elementId, paramName).
+		Scan(&oldValue)
 
+	// 3. Create event_log tracking entry (status=1 pending)
 	now := time.Now()
+	eventLogId, err := s.repo.InsertEventLog("SetParameterValues", elementId, username, 1, "")
+	if err != nil {
+		return fmt.Errorf("create event_log: %w", err)
+	}
+
+	// 4. Build operationParam JSON for tracking
+	opParam, _ := json.Marshal([]setParamEntry{{ParamName: paramName, ParamValue: value}})
+
+	// 5. Build SOAP SetParameterValues XML
+	headerId := soap.GenerateHeaderID()
+	params := []soap.ParameterValueStruct{
+		{Name: paramName, Value: value, Type: "xsd:string"},
+	}
+	soapXml := soap.BuildSetParameterValues(headerId, params, "")
+
+	// 6. Update event_log with tracking data
+	trackData, _ := json.Marshal(map[string]interface{}{
+		"header_id":      headerId,
+		"serial_number":  deviceInfo.SerialNumber,
+		"operation_type": "SET_PARAMETER_VALUES",
+		"operationParam": string(opParam),
+		"event_log_id":   eventLogId,
+		"issue_time":     now.Format(time.RFC3339),
+	})
+	s.repo.db.Table("event_log").Where("id = ?", eventLogId).
+		Updates(map[string]interface{}{
+			"command_track_data":   string(trackData),
+			"command_issue_time":   now,
+		})
+
+	// 7. Cache track data in Redis for response processing
+	trackKey := fmt.Sprintf("tr069:track:%s", headerId)
+	trackJson, _ := json.Marshal(map[string]interface{}{
+		"header_id":      headerId,
+		"sn":             deviceInfo.SerialNumber,
+		"operation_type": "SET_PARAMETER_VALUES",
+		"event_log_id":   eventLogId,
+	})
+	redis.Set(ctx, trackKey, string(trackJson), 24*time.Hour)
+
+	// 8. Push SOAP XML to device queue
+	queueKey := fmt.Sprintf("tr069:queue:%s", deviceInfo.SerialNumber)
+	if err := redis.LPush(ctx, queueKey, soapXml); err != nil {
+		logger.Errorf("failed to push SPV to device queue %s: %v", deviceInfo.SerialNumber, err)
+		// Update event_log as failed
+		s.repo.db.Table("event_log").Where("id = ?", eventLogId).
+			Update("status", 4) // 4=fail
+		return fmt.Errorf("push to device queue: %w", err)
+	}
+	redis.Expire(ctx, queueKey, 24*time.Hour)
+
+	// 9. Create parameter_log for audit trail (record the intent to change)
 	log := &ParameterLog{
 		ParameterName: &paramName,
+		OldValue:      &oldValue,
 		NewValue:      &value,
 		ChangeUser:    &username,
 		ChangeTime:    &now,
 		ElementId:     &elementId,
 	}
-	return s.repo.CreateParameterLog(log)
+	if err := s.repo.CreateParameterLog(log); err != nil {
+		logger.Errorf("failed to create parameter_log: %v", err)
+		// Non-fatal: the command was already dispatched
+	}
+
+	logger.Infof("SetParameter dispatched to device %s (neId=%d): %s=%s",
+		deviceInfo.SerialNumber, elementId, paramName, value)
+	return nil
 }
 
 // ---------------------------------------------------------------------------

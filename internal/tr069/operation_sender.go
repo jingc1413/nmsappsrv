@@ -145,7 +145,8 @@ func (o *OperationSender) SendDeleteObject(sn string, objectName string, operati
 	return o.msgManager.PutMessage(sn, soapXml)
 }
 
-// SendConnectionRequest sends a UDP connection request to wake up CPE.
+// SendConnectionRequest sends an HTTP connection request to wake up CPE.
+// TR-069 connection requests are HTTP over TCP (not UDP).
 func (o *OperationSender) SendConnectionRequest(sn string) error {
 	ctx := context.Background()
 
@@ -157,7 +158,7 @@ func (o *OperationSender) SendConnectionRequest(sn string) error {
 		return fmt.Errorf("no STUN info for device %s", sn)
 	}
 
-	// Build UDP connection request URL
+	// Build TCP connection request URL
 	// Expected STUN data format: {"ip": "...", "port": "..."}
 	ip := stunData["ip"]
 	port := stunData["port"]
@@ -171,15 +172,16 @@ func (o *OperationSender) SendConnectionRequest(sn string) error {
 
 	logger.Infof("sending connection request to device %s at %s", sn, connReqURL)
 
-	// Send raw HTTP GET via UDP DatagramPacket
-	// Note: TR-069 connection requests are typically HTTP over TCP, not UDP
-	// But if the requirement specifically says UDP, we use UDP here
-	conn, err := net.Dial("udp", addr)
+	// Send HTTP GET via TCP with timeout
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
-		logger.Errorf("failed to dial UDP for device %s: %v", sn, err)
-		return fmt.Errorf("failed to dial UDP: %w", err)
+		logger.Errorf("failed to dial TCP for device %s: %v", sn, err)
+		return fmt.Errorf("failed to dial TCP: %w", err)
 	}
 	defer conn.Close()
+
+	// Set read/write deadline
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	// Build HTTP GET request
 	httpReq := fmt.Sprintf("GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", addr)

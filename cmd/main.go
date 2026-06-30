@@ -641,6 +641,10 @@ func main() {
 	snmpWorker := snmp.NewWorker()
 	snmpWorker.Start()
 
+	// Offline detection worker (periodically checks device online status)
+	offlineWorker := tr069.NewOfflineWorker(db)
+	offlineWorker.Start()
+
 	// 6. 启动HTTP服务
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
