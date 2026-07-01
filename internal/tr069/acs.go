@@ -3,13 +3,14 @@ package tr069
 import (
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/base64"
 	"io"
 	"net/http"
 	"strings"
 
 	"nmsappsrv/internal/config"
 	"nmsappsrv/internal/device"
+	"nmsappsrv/internal/deviceauth"
+	"nmsappsrv/internal/tr069/auth"
 	"nmsappsrv/internal/tr069/soap"
 	"nmsappsrv/pkg/logger"
 
@@ -26,6 +27,7 @@ type ACSHandler struct {
 	xmlSigEnabled  bool
 	privKey        *rsa.PrivateKey
 	cert           *x509.Certificate
+	authService    *deviceauth.Service
 }
 
 // NewACSHandler creates a new ACSHandler with the given dependencies.
@@ -37,6 +39,7 @@ func NewACSHandler(db *gorm.DB, msgManager *MessageManager, eventProcessor *Even
 		msgManager:     msgManager,
 		eventProcessor: eventProcessor,
 		xmlSigEnabled:  tr069Cfg.EnableXMLSignature,
+		authService:    deviceauth.NewService(db),
 	}
 	if tr069Cfg.EnableXMLSignature {
 		if tr069Cfg.PrivateKeyPath != "" {
@@ -70,81 +73,74 @@ func (h *ACSHandler) HandleACS(c *gin.Context) {
 	h.handleACSWithType(c, "", "")
 }
 
-// ACSAuthMiddleware returns a Gin middleware that performs optional HTTP Basic authentication
-// for TR-069 CPE connections. If the device has connection_request_username configured in DB,
-// the middleware validates the incoming Basic auth credentials.
-// If no credentials are configured for the device, the request is allowed through (backward compatible).
+// ACSAuthMiddleware returns a Gin middleware that performs device authentication
+// for TR-069 CPE connections. It supports multiple auth strategies (Basic, Digest, Null)
+// configured per-tenant via Redis, aligned with Java's AuthenticationHandler.
+// Falls back to legacy per-device Basic auth when no tenant config exists.
 func (h *ACSHandler) ACSAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Extract SN from cookie first (for established sessions)
+		// Extract SN from cookie (for established sessions)
 		sn := ""
 		if cookie, err := c.Request.Cookie("SN"); err == nil {
 			sn = cookie.Value
 		}
 
-		// If no SN cookie, try to peek at the SOAP body to extract SN from Inform
+		// If no SN cookie, device is not yet identified — allow through (initial Inform)
 		if sn == "" {
-			// Allow Inform to pass through without auth (device not yet identified)
 			c.Next()
 			return
 		}
 
-		// Look up device credentials
+		// Look up device credentials from DB
 		var cpe device.CpeElement
 		err := h.db.Select("connection_request_username, connection_request_password").
 			Where("serial_number = ? AND deleted = ?", sn, false).First(&cpe).Error
 		if err != nil {
-			// Device not found or no credentials — allow through
+			// Device not found — allow through
 			c.Next()
 			return
 		}
 
-		// If device has no username configured, skip auth
-		if cpe.ConnectionRequestUsername == nil || *cpe.ConnectionRequestUsername == "" {
-			c.Next()
-			return
+		deviceUser := ""
+		devicePass := ""
+		if cpe.ConnectionRequestUsername != nil {
+			deviceUser = *cpe.ConnectionRequestUsername
 		}
-
-		// Validate HTTP Basic auth
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.Header("WWW-Authenticate", `Basic realm="TR-069 ACS"`)
-			c.Status(http.StatusUnauthorized)
-			c.Abort()
-			return
-		}
-
-		if !strings.HasPrefix(authHeader, "Basic ") {
-			c.Status(http.StatusUnauthorized)
-			c.Abort()
-			return
-		}
-
-		decoded, err := base64.StdEncoding.DecodeString(authHeader[6:])
-		if err != nil {
-			c.Status(http.StatusUnauthorized)
-			c.Abort()
-			return
-		}
-
-		parts := strings.SplitN(string(decoded), ":", 2)
-		if len(parts) != 2 {
-			c.Status(http.StatusUnauthorized)
-			c.Abort()
-			return
-		}
-
-		expectedUser := *cpe.ConnectionRequestUsername
-		expectedPass := ""
 		if cpe.ConnectionRequestPassword != nil {
-			expectedPass = *cpe.ConnectionRequestPassword
+			devicePass = *cpe.ConnectionRequestPassword
 		}
 
-		if parts[0] != expectedUser || parts[1] != expectedPass {
-			logger.Warnf("ACS auth failed for device %s: invalid credentials", sn)
-			c.Header("WWW-Authenticate", `Basic realm="TR-069 ACS"`)
-			c.Status(http.StatusUnauthorized)
-			c.Abort()
+		// If device has no username, skip auth
+		if deviceUser == "" {
+			c.Next()
+			return
+		}
+
+		// Try loading tenant-level auth config from Redis
+		licenseId, _ := c.Get("license_id")
+		lid, _ := licenseId.(string)
+
+		var strategy auth.Strategy
+
+		if lid != "" {
+			authCfg, cfgErr := h.authService.GetConfig(lid)
+			if cfgErr != nil {
+				logger.Warnf("failed to load auth config for tenant %s: %v", lid, cfgErr)
+			}
+			if authCfg != nil && authCfg.Enable {
+				strategy = auth.Get(authCfg.Algorithm)
+				logger.Debugf("using %s auth strategy for tenant %s", strategy.Name(), lid)
+			}
+		}
+
+		// Fallback: legacy per-device Basic auth (backward compatible)
+		if strategy == nil {
+			strategy = &auth.BasicStrategy{Realm: "TR-069 ACS"}
+		}
+
+		if !strategy.Authenticate(c, deviceUser, devicePass) {
+			logger.Warnf("ACS auth failed for device %s (strategy=%s)", sn, strategy.Name())
+			strategy.Challenge(c)
 			return
 		}
 

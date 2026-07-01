@@ -16,12 +16,14 @@ import (
 	"nmsappsrv/internal/corenet"
 	"nmsappsrv/internal/dashboard"
 	"nmsappsrv/internal/device"
+	"nmsappsrv/internal/deviceauth"
 	"nmsappsrv/internal/devicelog"
 	"nmsappsrv/internal/diagnostics"
 	"nmsappsrv/internal/eventlog"
 	"nmsappsrv/internal/ha"
 	"nmsappsrv/internal/health"
 	"nmsappsrv/internal/heartbeat"
+	"nmsappsrv/internal/initserver"
 	"nmsappsrv/internal/license"
 	"nmsappsrv/internal/mail"
 	"nmsappsrv/internal/middleware"
@@ -151,6 +153,8 @@ func main() {
 	resetH := reset.NewHandler(db)
 	blacklistH := blacklist.NewHandler(db)
 	ntpH := ntp.NewHandler(db)
+	initserverH := initserver.NewHandler(db)
+	deviceauthH := deviceauth.NewHandler(db)
 	sshH := sshmod.NewHandler(db)
 	mailH := mail.NewHandler(db, cfg.Mail.AESKey)
 	mailSvc := mail.NewService(db, cfg.Mail.AESKey)
@@ -505,6 +509,17 @@ func main() {
 			auth.POST("/updateNTPConfig", ntpH.UpdateNTPConfig)
 			auth.POST("/getNTPStatus", ntpH.GetNTPStatus)
 
+			// Init Server (零配置初始化服务器)
+			auth.GET("/initserver/getConfig", initserverH.GetConfig)
+			auth.POST("/initserver/save", initserverH.SaveConfig)
+			auth.GET("/initserver/exportConfig", initserverH.ExportConfig)
+			auth.POST("/initserver/uploadConfig", initserverH.UploadConfig)
+
+			// Device Auth (设备认证策略)
+			auth.GET("/deviceAuth/getConfig", deviceauthH.GetConfig)
+			auth.POST("/deviceAuth/save", deviceauthH.SaveConfig)
+			auth.GET("/deviceAuth/getAuthInfo", deviceauthH.GetAuthInfo)
+
 			// SSH Label
 			auth.POST("/addSSHLabel", sshH.AddSSHLabel)
 			auth.POST("/deleteSSHLabel", sshH.DeleteSSHLabel)
@@ -727,6 +742,9 @@ func main() {
 	router.POST("/tr069/cpeAcs", acsAuth, tr069ACS.HandleCpeACS)
 	router.POST("/tr069/enbAcs", acsAuth, tr069ACS.HandleEnbACS)
 	router.POST("/tr069/gnbAcs", acsAuth, tr069ACS.HandleGnbACS)
+
+	// Init Server endpoint (ZTP) — device-facing, no web UI auth
+	router.POST("/init-server", initserverH.HandleInitServer)
 
 	// SNMP trap receiver (UDP listener) — starts immediately, error checked inline
 	trapReceiver := snmp.NewTrapReceiver(database.DB, cfg.SNMP.TrapListenPort)
